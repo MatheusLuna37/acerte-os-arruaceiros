@@ -1,0 +1,35 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "cppbuild",
+            "label": "Build OpenGL com GCC",
+            "command": "C:/MinGW/bin/gcc.exe", // <-- SUBSTITUA PELO SEU CAMINHO
+            "args": [
+                "-g",
+                "${file}",
+                "-o",
+                "${fileDirname}\\${fileBasenameNoExtension}.exe",
+                "-I",
+                "C:/MinGW/include", // <-- SUBSTITUA PELO SEU CAMINHO
+                "-L",
+                "C:/MinGW/lib",     // <-- SUBSTITUA PELO SEU CAMINHO
+                "-lfreeglut",
+                "-lopengl32",
+                "-lglu32",
+                "-static-libgcc"
+            ],
+            "options": {
+                "cwd": "${fileDirname}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "Compilador: C:/MinGW/bin/gcc.exe" // <-- SUBSTITUA PELO SEU CAMINHO
+        }
+    ]
+}
