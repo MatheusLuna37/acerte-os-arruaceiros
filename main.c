@@ -68,18 +68,19 @@ int screen_width = 1920;
 int screen_height = 1080;
 
 // Câmera e Mouse (VERSÃO PRIMEIRA PESSOA)
-vec3 cameraPos   = {30.0f, 4.0f, -10.0f}; // Posição dos "olhos" da professora. Sinta-se à vontade para ajustar!
+vec3 cameraPos   = {30.0f, 8.0f, -10.0f}; // Posição dos "olhos" da professora. Sinta-se à vontade para ajustar!
 vec3 cameraFront = {0.0f, 1.0f, 0.0f}; // Direção inicial para onde a câmera olha
 vec3 cameraUp    = {0.0f, 1.0f, 0.0f};  // Vetor "para cima"
 
-float cameraYaw = -90.0f; // Yaw inicial para olhar para o centro da sala (eixo -Z)
-float cameraPitch = 0.0f;
+float cameraYaw = 160.0f; // Yaw inicial para olhar para o centro da sala (eixo -Z)
+float cameraPitch = -20.0f;
 int lastX, lastY;
 int mouse_left_button_down = 0;
 
 // NOVO: Variáveis para a mira automática da câmera
 vec3 cameraTargetDirection; // A direção final para onde a câmera deve olhar
 bool isCameraTurning = false; // Flag que controla se a câmera está no meio de uma virada
+float cameraTurnProgress = 0.0f; // Progresso da virada da câmera (0.0 a 1.0)
 
 bool keyStates[256] = {false};
 
@@ -126,11 +127,61 @@ void processKeyboard() {
 Model* ourModel = NULL;
 
 // NOVO: Variáveis para o Martelo e sua Animação
-Model* hammerModel = NULL; // Guarda a geometria do martelo
+// NÃO precisamos mais carregar modelo .obj - usaremos primitivas OpenGL!
 float hammerAnimationAngle = 0.0f; // Ângulo atual da animação de batida
+float hammerAnimationMovingtoTarget = 0.0f; // Progresso da animação (0.0 a 1.0)
 // Enum para controlar o estado da animação
-typedef enum { IDLE, SWINGING_DOWN, SWINGING_UP } HammerState;
+typedef enum { IDLE, MOVING_TO_TARGET, SWINGING_DOWN, SWINGING_UP, RETURNING } HammerState;
 HammerState hammerState = IDLE;
+
+// Posição do martelo no ESPAÇO 3D DA CENA (coordenadas mundiais)
+vec3 hammerPosStart = {35.0f, 6.0f, -6.0f}; // Posição inicial (será atualizada dinamicamente)
+vec3 hammerPosCurrent = {35.0f, 6.0f, -6.0f}; // Posição atual no mundo 3D
+vec3 hammerPosTarget = {0.0f, 0.0f, 0.0f}; // Posição alvo no mundo 3D (calculada por ray cast)
+
+// Escala do martelo (varia com a distância)
+float hammerBaseScale = 1.0f; // Escala base do martelo (aumente para martelo maior)
+float hammerCurrentScale = 1.0f; // Escala atual (ajustada pela distância)
+
+// Função para desenhar o martelo com primitivas OpenGL
+void drawHammer() {
+    GLUquadric* quadric = gluNewQuadric();
+    
+    // Cor do cabo (madeira marrom)
+    glColor3f(0.55f, 0.27f, 0.07f);
+    
+    // CABO: Cilindro vertical (de baixo para cima)
+    glPushMatrix();
+    glRotatef(-90.0f, 1.0f, 0.0f, 0.0f); // Rotaciona para ficar vertical
+    gluCylinder(quadric, 0.15, 0.15, 2.5, 16, 1); // raio, raio_topo, altura, slices, stacks
+    glPopMatrix();
+    
+    // Cor da cabeça (metal cinza)
+    glColor3f(0.6f, 0.6f, 0.65f);
+    
+    // CABEÇA DO MARTELO: Cubo/Paralelepípedo no topo
+    glPushMatrix();
+    glTranslatef(0.0f, 2.5f, 0.0f); // Move para o topo do cabo
+    
+    // Desenha um cubo achatado (cabeça do martelo)
+    glPushMatrix();
+    glScalef(0.8f, 0.4f, 0.4f); // Largura, altura, profundidade
+    glutSolidCube(1.0);
+    glPopMatrix();
+    
+    glPopMatrix();
+    
+    // PONTA DE IMPACTO: Pequeno cilindro na ponta da cabeça
+    glColor3f(0.5f, 0.5f, 0.55f);
+    glPushMatrix();
+    glTranslatef(0.0f, 2.5f, 0.0f);
+    glRotatef(90.0f, 0.0f, 1.0f, 0.0f); // Rotaciona para apontar para frente
+    glTranslatef(0.0f, 0.0f, -0.4f);
+    gluCylinder(quadric, 0.15, 0.18, 0.3, 16, 1); // Ponta levemente cônica
+    glPopMatrix();
+    
+    gluDeleteQuadric(quadric);
+}
 
 // --- Protótipos ---
 void renderScene(void);
@@ -186,11 +237,8 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    hammerModel = Model_Create("Power_Hammer.obj"); // <-- Mude o caminho se necessário
-    if (!hammerModel) {
-        fprintf(stderr, "Falha ao carregar o modelo do martelo.\n");
-        return -1;
-    }
+    // Martelo agora é desenhado com primitivas OpenGL - não precisa carregar modelo!
+    printf("Martelo será desenhado com primitivas OpenGL (não requer arquivo .obj)\n");
     
     // --- Registro de Callbacks e Loop Principal ---
     glutDisplayFunc(renderScene);
@@ -213,35 +261,93 @@ void renderScene(void) {
     processKeyboard();
 
     // 1. Atualiza a animação do martelo (lógica movida para o topo)
-    float swingSpeed = 4.0f;
-    if (hammerState == SWINGING_DOWN) {
+    float moveSpeed = 0.04f; // Velocidade de movimento
+    float swingSpeed = 1.5f; // Velocidade de batida
+    
+    if (hammerState == MOVING_TO_TARGET) {
+        // Só move o martelo se a câmera já tiver virado pelo menos 60%
+        float cameraThreshold = 1.0f;
+        if (!isCameraTurning || cameraTurnProgress >= cameraThreshold) {
+            // Move o martelo em direção ao alvo no espaço 3D
+            hammerAnimationMovingtoTarget += moveSpeed;
+            if (hammerAnimationMovingtoTarget >= 1.0f) {
+                hammerAnimationMovingtoTarget = 1.0f;
+                hammerState = SWINGING_DOWN;
+            }
+            
+            // Interpolação da posição 3D (lerp vetorial)
+            glm_vec3_lerp(hammerPosStart, hammerPosTarget, hammerAnimationMovingtoTarget, hammerPosCurrent);
+            
+            // Calcula a escala baseada na distância da câmera (perspectiva suave)
+            float distanceToCamera = glm_vec3_distance(cameraPos, hammerPosCurrent);
+            // Quanto mais longe, menor o martelo parece (perspectiva MUITO suave)
+            // Escala varia de 0.9x a 1.0x baseado na distância (10 a 100 unidades)
+            // Variação mínima para o martelo não ficar muito pequeno
+            float distanceFactor = glm_clamp(1.0f - ((distanceToCamera - 10.0f) / 100.0f) * 0.1f, 0.9f, 1.0f);
+            hammerCurrentScale = hammerBaseScale * distanceFactor;
+        }
+        
+    } else if (hammerState == SWINGING_DOWN) {
         hammerAnimationAngle += swingSpeed;
         if (hammerAnimationAngle >= 90.0f) {
             hammerAnimationAngle = 90.0f;
             hammerState = SWINGING_UP;
         }
+        
     } else if (hammerState == SWINGING_UP) {
         hammerAnimationAngle -= swingSpeed;
         if (hammerAnimationAngle <= 0.0f) {
             hammerAnimationAngle = 0.0f;
+            hammerState = RETURNING;
+        }
+        
+    } else if (hammerState == RETURNING) {
+        // Retorna o martelo para a posição inicial
+        hammerAnimationMovingtoTarget -= moveSpeed;
+        if (hammerAnimationMovingtoTarget <= 0.0f) {
+            hammerAnimationMovingtoTarget = 0.0f;
             hammerState = IDLE;
+            glm_vec3_copy(hammerPosStart, hammerPosCurrent);
+            hammerCurrentScale = hammerBaseScale;
+        } else {
+            // Interpolação da posição 3D durante retorno
+            glm_vec3_lerp(hammerPosStart, hammerPosTarget, hammerAnimationMovingtoTarget, hammerPosCurrent);
+            
+            // Atualiza escala durante retorno (mesma fórmula suave)
+            float distanceToCamera = glm_vec3_distance(cameraPos, hammerPosCurrent);
+            float distanceFactor = glm_clamp(1.0f - ((distanceToCamera - 10.0f) / 50.0f) * 0.25f, 0.75f, 1.0f);
+            hammerCurrentScale = hammerBaseScale * distanceFactor;
         }
     }
 
     // 2. Atualiza a mira da câmera se ela estiver virando
     if (isCameraTurning) {
         // Interpola suavemente a direção atual para a direção alvo
-        float interpolationSpeed = 0.15f; // Ajuste para uma virada mais rápida ou lenta
+        float interpolationSpeed = 0.08f; // Velocidade de virada mais controlada
+        
+        vec3 oldFront;
+        glm_vec3_copy(cameraFront, oldFront);
+        
         glm_vec3_lerp(cameraFront, cameraTargetDirection, interpolationSpeed, cameraFront);
         glm_vec3_normalize(cameraFront);
+
+        // Calcula o progresso da virada (0.0 = início, 1.0 = completo)
+        float distanceToTarget = glm_vec3_distance(cameraFront, cameraTargetDirection);
+        float initialDistance = glm_vec3_distance(oldFront, cameraTargetDirection);
+        if (initialDistance > 0.001f) {
+            cameraTurnProgress = 1.0f - (distanceToTarget / initialDistance);
+            if (cameraTurnProgress > 1.0f) cameraTurnProgress = 1.0f;
+            if (cameraTurnProgress < 0.0f) cameraTurnProgress = 0.0f;
+        }
 
         // Atualiza os ângulos Yaw e Pitch a partir do novo vetor de direção
         cameraPitch = glm_deg(asin(cameraFront[1]));
         cameraYaw = glm_deg(atan2(cameraFront[2], cameraFront[0]));
 
         // Para a virada quando estiver perto o suficiente do alvo
-        if (glm_vec3_distance(cameraFront, cameraTargetDirection) < 0.05f) {
+        if (distanceToTarget < 0.05f) {
             isCameraTurning = false;
+            cameraTurnProgress = 1.0f;
         }
     }
 
@@ -291,23 +397,49 @@ void renderScene(void) {
     // --- Desenha o Modelo ---
     Model_Draw(ourModel);
 
-    glClear(GL_DEPTH_BUFFER_BIT);
-
+    // --- Desenha o Martelo com Primitivas OpenGL no Espaço 3D ---
+    // IMPORTANTE: Desabilita depth test para o martelo sempre ficar visível (não ser coberto)
+    glDisable(GL_DEPTH_TEST);
+    
     glPushMatrix(); // Salva a matriz atual
-    glLoadIdentity(); // Reseta a matriz para desenhar o martelo
 
-    glTranslatef(0.4f, -0.3f, -5.0f); // Move para a posição final na tela
+    // Move o martelo para sua posição atual no mundo 3D
+    glTranslatef(hammerPosCurrent[0], hammerPosCurrent[1], hammerPosCurrent[2]);
+    
+    // Calcula a direção do alvo para orientar o martelo
+    vec3 hammerToTarget;
+    glm_vec3_sub(hammerPosTarget, hammerPosCurrent, hammerToTarget);
+    
+    // Se ainda está se movendo, aponta para o alvo
+    if (hammerState != IDLE && glm_vec3_norm(hammerToTarget) > 0.01f) {
+        glm_vec3_normalize(hammerToTarget);
+        
+        // Calcula ângulos de rotação para apontar para o alvo
+        float yaw = glm_deg(atan2f(hammerToTarget[0], hammerToTarget[2]));
+        float pitch = glm_deg(asinf(-hammerToTarget[1]));
+        
+        glRotatef(yaw, 0.0f, 1.0f, 0.0f);   // Rotação horizontal
+        glRotatef(pitch, 1.0f, 0.0f, 0.0f); // Rotação vertical
+    }
 
-    // 5. APLICA A ANIMAÇÃO!
-    //    Gira o martelo para baixo/cima em torno do eixo X (o eixo do "braço").
+    // Aplica a animação de batida ANTES da rotação final
+    // Isso faz o martelo girar em torno do cabo (pivô no cabo)
     glRotatef(hammerAnimationAngle, 1.0f, 0.0f, 0.0f);
 
-    // 6. Escala o martelo para um tamanho razoável
-    glScalef(0.3f, 0.3f, 0.3f);
+    // Escala o martelo baseada na distância (perspectiva automática)
+    glScalef(hammerCurrentScale, hammerCurrentScale, hammerCurrentScale);
 
-    Model_Draw(hammerModel); // Desenha o martelo
+    // IMPORTANTE: Offset para que a CABEÇA (y=2.5 local) fique no alvo, não o cabo (y=0)
+    // Movemos o martelo -2.5 unidades em Y local para compensar
+    glTranslatef(0.0f, -2.5f, 0.0f);
+
+    // Desenha o martelo com primitivas OpenGL
+    drawHammer();
 
     glPopMatrix(); // Restaura a matriz original
+    
+    // Reabilita depth test para os demais objetos
+    glEnable(GL_DEPTH_TEST);
 
     glutSwapBuffers();
 }
@@ -325,9 +457,9 @@ void mouseButton(int button, int state, int x, int y) {
     if (button == GLUT_LEFT_BUTTON) {
         mouse_left_button_down = (state == GLUT_DOWN);
         
-        // Inicia a animação e o raycasting ao pressionar o botão
-        if (state == GLUT_DOWN) {
-            // --- CÁLCULO DO ALVO (RAYCASTING) ---
+        // Inicia a animação ao pressionar o botão
+        if (state == GLUT_DOWN && hammerState == IDLE) {
+            // --- RAY CASTING PARA ENCONTRAR PONTO 3D NO MUNDO ---
             
             // 1. Pega as matrizes e o viewport atuais do OpenGL
             GLdouble modelview[16];
@@ -337,14 +469,14 @@ void mouseButton(int button, int state, int x, int y) {
             glGetDoublev(GL_PROJECTION_MATRIX, projection);
             glGetIntegerv(GL_VIEWPORT, viewport);
 
-            // 2. Converte as coordenadas da janela para o sistema do OpenGL (Y invertido)
+            // 2. Converte coordenadas da janela (Y invertido)
             float winY = (float)viewport[3] - (float)y;
-
+            
             // 3. "Desprojeta" o clique para obter um raio 3D no mundo
             GLdouble near_x, near_y, near_z;
             GLdouble far_x, far_y, far_z;
-            gluUnProject(x, winY, 0.0, modelview, projection, viewport, &near_x, &near_y, &near_z); // Ponto no plano próximo
-            gluUnProject(x, winY, 1.0, modelview, projection, viewport, &far_x, &far_y, &far_z);   // Ponto no plano distante
+            gluUnProject(x, winY, 0.0, modelview, projection, viewport, &near_x, &near_y, &near_z);
+            gluUnProject(x, winY, 1.0, modelview, projection, viewport, &far_x, &far_y, &far_z);
 
             vec3 ray_origin = {(float)near_x, (float)near_y, (float)near_z};
             vec3 ray_far = {(float)far_x, (float)far_y, (float)far_z};
@@ -354,21 +486,58 @@ void mouseButton(int button, int state, int x, int y) {
             glm_vec3_normalize(ray_dir);
 
             // 4. Calcula a interseção do raio com o plano do chão (y=0)
-            if (ray_dir[1] < -0.001f) { // Evita divisão por zero e raios que não vão para baixo
+            bool targetFound = false;
+            if (fabs(ray_dir[1]) > 0.001f) {
                 float t = -ray_origin[1] / ray_dir[1];
-                vec3 targetPoint;
-                glm_vec3_scale(ray_dir, t, targetPoint);
-                glm_vec3_add(ray_origin, targetPoint, targetPoint);
+                if (t > 0) { // Apenas se o ponto está à frente da câmera
+                    vec3 targetPoint;
+                    glm_vec3_scale(ray_dir, t, targetPoint);
+                    glm_vec3_add(ray_origin, targetPoint, targetPoint);
+                    
+                    // Define o alvo 3D do martelo (ligeiramente acima do chão)
+                    glm_vec3_copy(targetPoint, hammerPosTarget);
+                    hammerPosTarget[1] = 0.5f; // Altura ligeiramente acima do chão
+                    targetFound = true;
+                    
+                    printf("Alvo do martelo no espaço 3D: (%.2f, %.2f, %.2f)\n", 
+                           hammerPosTarget[0], hammerPosTarget[1], hammerPosTarget[2]);
 
-                // 5. Define a direção alvo para a câmera e inicia a virada
-                glm_vec3_sub(targetPoint, cameraPos, cameraTargetDirection);
-                glm_vec3_normalize(cameraTargetDirection);
-                isCameraTurning = true;
+                    // 5. Define a direção alvo para a câmera e inicia a virada
+                    glm_vec3_sub(targetPoint, cameraPos, cameraTargetDirection);
+                    glm_vec3_normalize(cameraTargetDirection);
+                    isCameraTurning = true;
+                }
             }
 
-            // Inicia a animação do martelo
-            if (hammerState == IDLE) {
-                hammerState = SWINGING_DOWN;
+            // 6. Inicia a animação do martelo (se encontrou um alvo válido)
+            if (targetFound) {
+                // Calcula posição inicial do martelo: próximo da câmera, ligeiramente à direita e abaixo
+                vec3 rightVector;
+                vec3 upVector = {0.0f, 1.0f, 0.0f};
+                vec3 forwardOffset;
+                
+                // Calcula vetor direita (perpendicular a front e up)
+                glm_vec3_cross(cameraFront, upVector, rightVector);
+                glm_vec3_normalize(rightVector);
+                
+                glm_vec3_scale(cameraFront, 2.0f, forwardOffset); // 2 unidades à frente (mais próximo)
+                
+                glm_vec3_copy(cameraPos, hammerPosStart);
+                glm_vec3_add(hammerPosStart, forwardOffset, hammerPosStart); // Move para frente
+                
+                // Adiciona offset para direita e para baixo
+                vec3 rightOffset;
+                glm_vec3_scale(rightVector, 0.8f, rightOffset); // 0.8 unidades à direita
+                glm_vec3_add(hammerPosStart, rightOffset, hammerPosStart);
+                
+                hammerPosStart[1] += 0.5f; // Eleva apenas 0.5 unidades (mais baixo na tela)
+                
+                hammerAnimationMovingtoTarget = 0.0f;
+                hammerAnimationAngle = 0.0f;
+                glm_vec3_copy(hammerPosStart, hammerPosCurrent);
+                hammerCurrentScale = hammerBaseScale;
+                cameraTurnProgress = 0.0f; // Reseta o progresso da câmera
+                hammerState = MOVING_TO_TARGET;
             }
         }
     }
@@ -398,7 +567,7 @@ void mouseMove(int x, int y) {
 void cleanup(void) {
     printf("Limpando recursos...\n");
     Model_Destroy(ourModel);
-    Model_Destroy(hammerModel); // NOVO
+    // Martelo agora é primitiva OpenGL - não precisa destruir modelo
 }
 
 // ===================================================================================
