@@ -84,19 +84,90 @@ float cameraTurnProgress = 0.0f; // Progresso da virada da câmera (0.0 a 1.0)
 
 bool keyStates[256] = {false};
 
-// NOVA FUNÇÃO: Chamada quando uma tecla é pressionada
+Model* ourModel = NULL;
+
+// NOVO: Variáveis para o Martelo e sua Animação
+// NÃO precisamos mais carregar modelo .obj - usaremos primitivas OpenGL!
+float hammerAnimationAngle = 0.0f; // Ângulo atual da animação de batida
+float hammerAnimationMovingtoTarget = 0.0f; // Progresso da animação (0.0 a 1.0)
+// Enum para controlar o estado da animação
+typedef enum { IDLE, MOVING_TO_TARGET, SWINGING_DOWN, SWINGING_UP, RETURNING } HammerState;
+HammerState hammerState = IDLE;
+
+// Posição do martelo no ESPAÇO 3D DA CENA (coordenadas mundiais)
+vec3 hammerPosStart = {35.0f, 6.0f, -6.0f}; // Posição inicial (será atualizada dinamicamente)
+vec3 hammerPosCurrent = {35.0f, 6.0f, -6.0f}; // Posição atual no mundo 3D
+vec3 hammerPosTarget = {0.0f, 0.0f, 0.0f}; // Posição alvo no mundo 3D (calculada por ray cast)
+
+// Escala do martelo (varia com a distância)
+float hammerBaseScale = 1.0f; // Escala base do martelo (aumente para martelo maior)
+float hammerCurrentScale = 1.0f; // Escala atual (ajustada pela distância)
+
+// --- SISTEMA WHACK-A-MOLE: Slots e Bonecos ---
+typedef struct {
+    vec3 pos; // x, y, z (posição no mundo)
+    int clicked; // 0 = não clicado, 1 = já clicado
+    int type; // 0..3 tipos diferentes de bonecos (cores)
+} Slot;
+
+Slot* slots = NULL;
+unsigned int numSlots = 0;
+int score = 0;
+
+// Lógica do jogo
+int gameActive = 0; // 0 = modo livre (todos visíveis), 1 = modo jogo (um por vez)
+int currentActive = -1; // índice do slot atualmente visível
+int moleVisible = 0; // se o boneco está visível
+unsigned int moleShowMs = 900; // tempo visível em ms
+unsigned int moleIntervalMs = 400; // tempo entre aparições
+
+int drawCubeMode = 1; // 1 = desenha bonecos, 0 = desenha quadrados verdes
+float slotOffsetX = 0.0f; // offset para ajuste fino
+float slotOffsetZ = 0.0f;
+
+// Protótipos whack-a-mole
+void gameTick(int value);
+void startGame();
+void stopGame();
+void addSlot(float centerX, float topY, float centerZ);
+void addSlotWithType(float centerX, float topY, float centerZ, int type);
+void drawSlot(float x, float z);
+void drawBoneco(float x, float z);
+void drawBonecoAtIndex(unsigned int idx);
+int loadSlotsFromFile(const char* path);
+
+// ===================================================================================
+// FUNÇÕES DE INPUT (TECLADO)
+// ===================================================================================
+
+// Chamada quando uma tecla é pressionada
 void keyboardDown(unsigned char key, int x, int y) {
-    keyStates[key] = true;
+    if ((unsigned char)key < 256) keyStates[(unsigned char)key] = true;
+    
+    // Teclas especiais do jogo
+    if (key == 'b' || key == 'B') {
+        if (gameActive) {
+            stopGame();
+            printf("⏸ Jogo pausado\n");
+        } else {
+            startGame();
+            printf("▶ Jogo iniciado!\n");
+        }
+    } else if (key == 'v' || key == 'V') {
+        drawCubeMode = !drawCubeMode;
+        printf("Modo visual: %s\n", drawCubeMode ? "Bonecos 3D" : "Quadrados verdes");
+        glutPostRedisplay();
+    }
 }
 
-// NOVA FUNÇÃO: Chamada quando uma tecla é solta
+// Chamada quando uma tecla é solta
 void keyboardUp(unsigned char key, int x, int y) {
-    keyStates[key] = false;
+    if ((unsigned char)key < 256) keyStates[(unsigned char)key] = false;
 }
 
-// NOVA FUNÇÃO: Processa o input do teclado a cada quadro
+// Processa o input do teclado a cada quadro
 void processKeyboard() {
-    float movementSpeed = 0.1f; // Ajuste para o personagem andar mais rápido ou mais devagar
+    float movementSpeed = 0.1f;
 
     if (keyStates['w']) {
         vec3 move;
@@ -123,25 +194,6 @@ void processKeyboard() {
         glm_vec3_add(cameraPos, move, cameraPos);
     }
 }
-
-Model* ourModel = NULL;
-
-// NOVO: Variáveis para o Martelo e sua Animação
-// NÃO precisamos mais carregar modelo .obj - usaremos primitivas OpenGL!
-float hammerAnimationAngle = 0.0f; // Ângulo atual da animação de batida
-float hammerAnimationMovingtoTarget = 0.0f; // Progresso da animação (0.0 a 1.0)
-// Enum para controlar o estado da animação
-typedef enum { IDLE, MOVING_TO_TARGET, SWINGING_DOWN, SWINGING_UP, RETURNING } HammerState;
-HammerState hammerState = IDLE;
-
-// Posição do martelo no ESPAÇO 3D DA CENA (coordenadas mundiais)
-vec3 hammerPosStart = {35.0f, 6.0f, -6.0f}; // Posição inicial (será atualizada dinamicamente)
-vec3 hammerPosCurrent = {35.0f, 6.0f, -6.0f}; // Posição atual no mundo 3D
-vec3 hammerPosTarget = {0.0f, 0.0f, 0.0f}; // Posição alvo no mundo 3D (calculada por ray cast)
-
-// Escala do martelo (varia com a distância)
-float hammerBaseScale = 1.0f; // Escala base do martelo (aumente para martelo maior)
-float hammerCurrentScale = 1.0f; // Escala atual (ajustada pela distância)
 
 // Função para desenhar o martelo com primitivas OpenGL
 void drawHammer() {
@@ -181,6 +233,191 @@ void drawHammer() {
     glPopMatrix();
     
     gluDeleteQuadric(quadric);
+}
+
+// ===================================================================================
+// IMPLEMENTAÇÃO WHACK-A-MOLE
+// ===================================================================================
+
+void gameTick(int value) {
+    if (!gameActive) return;
+    if (moleVisible) {
+        moleVisible = 0;
+        currentActive = -1;
+        glutTimerFunc(moleIntervalMs, gameTick, 0);
+    } else {
+        if (numSlots == 0) {
+            glutTimerFunc(moleIntervalMs, gameTick, 0);
+            return;
+        }
+        int next = rand() % (int)numSlots;
+        if (numSlots > 1 && next == currentActive) {
+            next = (next + 1) % (int)numSlots;
+        }
+        currentActive = next;
+        moleVisible = 1;
+        slots[currentActive].clicked = 0;
+        glutTimerFunc(moleShowMs, gameTick, 0);
+    }
+    glutPostRedisplay();
+}
+
+void startGame() {
+    if (gameActive) return;
+    gameActive = 1;
+    score = 0;
+    currentActive = -1;
+    moleVisible = 0;
+    glutTimerFunc(moleIntervalMs, gameTick, 0);
+}
+
+void stopGame() {
+    if (!gameActive) return;
+    gameActive = 0;
+    currentActive = -1;
+    moleVisible = 0;
+    glutPostRedisplay();
+}
+
+void addSlot(float centerX, float topY, float centerZ) {
+    numSlots++;
+    slots = (Slot*)realloc(slots, numSlots * sizeof(Slot));
+    slots[numSlots - 1].pos[0] = centerX;
+    slots[numSlots - 1].pos[1] = topY;
+    slots[numSlots - 1].pos[2] = centerZ;
+    slots[numSlots - 1].clicked = 0;
+}
+
+void addSlotWithType(float centerX, float topY, float centerZ, int type) {
+    addSlot(centerX, topY, centerZ);
+    if (numSlots > 0) slots[numSlots - 1].type = type % 4;
+}
+
+void drawSlot(float x, float z) {
+    float y = 0.01f;
+    for (unsigned int i = 0; i < numSlots; i++) {
+        if (fabsf(slots[i].pos[0] - x) < 0.0001f && fabsf(slots[i].pos[2] - z) < 0.0001f) {
+            y = slots[i].pos[1];
+            break;
+        }
+    }
+    
+    float half = 0.30f;
+    x += slotOffsetX;
+    z += slotOffsetZ;
+    
+    glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
+    glColor3f(0.0f, 0.9f, 0.0f);
+    
+    glBegin(GL_QUADS);
+        glVertex3f(x - half, y, z - half);
+        glVertex3f(x + half, y, z - half);
+        glVertex3f(x + half, y, z + half);
+        glVertex3f(x - half, y, z + half);
+    glEnd();
+    
+    glPopAttrib();
+}
+
+void drawBoneco(float x, float z) {
+    float y = 0.01f;
+    for (unsigned int i = 0; i < numSlots; i++) {
+        if (fabsf(slots[i].pos[0] - x) < 0.0001f && fabsf(slots[i].pos[2] - z) < 0.0001f) {
+            y = slots[i].pos[1];
+            break;
+        }
+    }
+    
+    float trunkWidth = 0.9f;
+    float trunkHeight = 1.4f;
+    float trunkDepth = 0.6f;
+    float headRadius = 0.35f;
+    
+    x += slotOffsetX;
+    z += slotOffsetZ;
+    
+    glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT);
+    glDisable(GL_LIGHTING);
+    glDisable(GL_TEXTURE_2D);
+    
+    // Cor baseada no tipo
+    float trunkR = 0.8f, trunkG = 0.6f, trunkB = 0.3f;
+    for (unsigned int i = 0; i < numSlots; i++) {
+        if (fabsf(slots[i].pos[0] - (x - slotOffsetX)) < 0.0001f && fabsf(slots[i].pos[2] - (z - slotOffsetZ)) < 0.0001f) {
+            int t = slots[i].type % 4;
+            if (t == 0) { trunkR = 0.0f; trunkG = 0.9f; trunkB = 0.0f; } // verde +1
+            else if (t == 1) { trunkR = 0.0f; trunkG = 0.0f; trunkB = 0.9f; } // azul +2
+            else if (t == 2) { trunkR = 0.9f; trunkG = 0.0f; trunkB = 0.0f; } // vermelho -1
+            else { trunkR = 0.05f; trunkG = 0.05f; trunkB = 0.05f; } // preto +4
+            break;
+        }
+    }
+    
+    // Tronco
+    glPushMatrix();
+    glTranslatef(x, y + trunkHeight * 0.5f, z);
+    glColor3f(trunkR, trunkG, trunkB);
+    glScalef(trunkWidth, trunkHeight, trunkDepth);
+    glutSolidCube(1.0f);
+    glPopMatrix();
+    
+    // Cabeça
+    glPushMatrix();
+    glTranslatef(x, y + trunkHeight + headRadius, z);
+    glutSolidSphere(headRadius, 16, 16);
+    glPopMatrix();
+    
+    glPopAttrib();
+}
+
+void drawBonecoAtIndex(unsigned int idx) {
+    if (idx >= numSlots) return;
+    float x = slots[idx].pos[0];
+    float z = slots[idx].pos[2];
+    drawBoneco(x, z);
+}
+
+int loadSlotsFromFile(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return 0;
+    
+    float x,y,z;
+    int type;
+    unsigned int count = 0;
+    float tmp[8][3];
+    int types[8];
+    char line[256];
+    
+    while (count < 8 && fgets(line, sizeof(line), f)) {
+        size_t ln = strlen(line);
+        while (ln > 0 && (line[ln-1] == '\n' || line[ln-1] == '\r')) { line[--ln] = '\0'; }
+        
+        int scanned = sscanf(line, "%f %f %f %d", &x, &y, &z, &type);
+        if (scanned == 3 || scanned == 4) {
+            tmp[count][0] = x;
+            tmp[count][1] = y;
+            tmp[count][2] = z;
+            if (scanned == 4 && type >= 0 && type <= 3) types[count] = type;
+            else types[count] = rand() % 4;
+            count++;
+        }
+    }
+    fclose(f);
+    
+    if (count != 8) {
+        printf("spots.txt precisa conter 8 linhas (encontradas=%u)\n", count);
+        return 0;
+    }
+    
+    if (slots) { free(slots); slots = NULL; numSlots = 0; }
+    for (unsigned int i = 0; i < 8; i++) {
+        addSlotWithType(tmp[i][0], tmp[i][1], tmp[i][2], types[i]);
+        printf("  Slot %d: (%.2f, %.2f, %.2f) Tipo=%d\n", i, tmp[i][0], tmp[i][1], tmp[i][2], types[i]);
+    }
+    printf("✓ 8 slots carregados de %s\n", path);
+    return 1;
 }
 
 // --- Protótipos ---
@@ -240,13 +477,27 @@ int main(int argc, char** argv) {
     // Martelo agora é desenhado com primitivas OpenGL - não precisa carregar modelo!
     printf("Martelo será desenhado com primitivas OpenGL (não requer arquivo .obj)\n");
     
+    // Carrega slots (topeiras/bonecos) do arquivo
+    FILE* fspots = fopen("spots.txt", "r");
+    if (fspots) {
+        fclose(fspots);
+        if (loadSlotsFromFile("spots.txt")) {
+            printf("✓ Slots carregados! Tecla B = iniciar/parar jogo, V = alternar modo visual\n");
+        }
+    } else {
+        printf("⚠ spots.txt não encontrado - jogo sem bonecos\n");
+    }
+    
+    // Inicializa gerador de números aleatórios
+    srand((unsigned int)time(NULL));
+    
     // --- Registro de Callbacks e Loop Principal ---
     glutDisplayFunc(renderScene);
     glutReshapeFunc(reshape);
     glutMouseFunc(mouseButton);
     glutMotionFunc(mouseMove);
-    glutKeyboardFunc(keyboardDown);     // NOVO: Registra a função para tecla pressionada
-    glutKeyboardUpFunc(keyboardUp);       // NOVO: Registra a função para tecla solta
+    glutKeyboardFunc(keyboardDown);
+    glutKeyboardUpFunc(keyboardUp);
     atexit(cleanup);
 
     glutMainLoop();
@@ -273,6 +524,7 @@ void renderScene(void) {
             if (hammerAnimationMovingtoTarget >= 1.0f) {
                 hammerAnimationMovingtoTarget = 1.0f;
                 hammerState = SWINGING_DOWN;
+                printf("⚡ Martelo chegou no alvo, iniciando swing!\n");
             }
             
             // Interpolação da posição 3D (lerp vetorial)
@@ -292,6 +544,51 @@ void renderScene(void) {
         if (hammerAnimationAngle >= 90.0f) {
             hammerAnimationAngle = 90.0f;
             hammerState = SWINGING_UP;
+            
+            // DETECÇÃO DE COLISÃO NO MOMENTO DO IMPACTO!
+            float hitRadius = 20.0f; // Range equilibrado
+            int hit = 0;
+            float minDist = 999999.0f;
+            int closestSlot = -1;
+            
+            for (unsigned int i = 0; i < numSlots; i++) {
+                // Se jogo ativo, só considera o boneco ativo e visível
+                if (gameActive && ((int)i != currentActive || !moleVisible)) continue;
+                
+                // Verifica distância 2D (X e Z) entre martelo e boneco
+                // IGNORA Y porque o raycast aponta pro chão (Y=0.5) mas slots estão em Y=2.0
+                float dx = slots[i].pos[0] - hammerPosTarget[0];
+                float dz = slots[i].pos[2] - hammerPosTarget[2];
+                float dist = sqrtf(dx*dx + dz*dz);
+                
+                // Rastreia o slot mais próximo
+                if (dist < minDist) {
+                    minDist = dist;
+                    closestSlot = i;
+                }
+                
+                if (dist <= hitRadius && !slots[i].clicked) {
+                    slots[i].clicked = 1;
+                    int points = (slots[i].type == 0) ? 1 : 
+                                (slots[i].type == 1) ? 2 :
+                                (slots[i].type == 2) ? -1 : 4;
+                    score += points;
+                    printf("💥 ACERTOU! Slot %d Tipo %d = %+d pts | Score: %d | Dist: %.2f\n", 
+                           i, slots[i].type, points, score, dist);
+                    
+                    if (gameActive) {
+                        moleVisible = 0; // Esconde imediatamente
+                    }
+                    hit = 1;
+                    break;
+                }
+            }
+            
+            // Se errou, mostra a distância até o mais próximo
+            if (!hit && closestSlot >= 0) {
+                printf("❌ ERROU! Mais próximo: Slot %d a %.2f unidades (precisa < %.1f)\n", 
+                       closestSlot, minDist, hitRadius);
+            }
         }
         
     } else if (hammerState == SWINGING_UP) {
@@ -397,6 +694,21 @@ void renderScene(void) {
     // --- Desenha o Modelo ---
     Model_Draw(ourModel);
 
+    // --- Desenha os Bonecos (Whack-a-Mole) ---
+    if (gameActive) {
+        // Modo jogo: desenha apenas o boneco ativo
+        if (currentActive >= 0 && (unsigned int)currentActive < numSlots && moleVisible) {
+            if (drawCubeMode) drawBonecoAtIndex(currentActive);
+            else drawSlot(slots[currentActive].pos[0], slots[currentActive].pos[2]);
+        }
+    } else {
+        // Modo livre: desenha todos os bonecos
+        for (unsigned int i = 0; i < numSlots; i++) {
+            if (drawCubeMode) drawBonecoAtIndex(i);
+            else drawSlot(slots[i].pos[0], slots[i].pos[2]);
+        }
+    }
+
     // --- Desenha o Martelo com Primitivas OpenGL no Espaço 3D ---
     // IMPORTANTE: Desabilita depth test para o martelo sempre ficar visível (não ser coberto)
     glDisable(GL_DEPTH_TEST);
@@ -440,6 +752,29 @@ void renderScene(void) {
     
     // Reabilita depth test para os demais objetos
     glEnable(GL_DEPTH_TEST);
+
+    // --- Desenha Score HUD ---
+    char scoreStr[64];
+    sprintf(scoreStr, "Score: %d", score);
+    
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    gluOrtho2D(0, screen_width, 0, screen_height);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    
+    glColor3f(1.0f, 1.0f, 1.0f);
+    glRasterPos2i(10, screen_height - 20);
+    for (char* c = scoreStr; *c; c++) {
+        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+    }
+    
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
 
     glutSwapBuffers();
 }
@@ -499,7 +834,7 @@ void mouseButton(int button, int state, int x, int y) {
                     hammerPosTarget[1] = 0.5f; // Altura ligeiramente acima do chão
                     targetFound = true;
                     
-                    printf("Alvo do martelo no espaço 3D: (%.2f, %.2f, %.2f)\n", 
+                    printf("🎯 Alvo do martelo: (%.2f, %.2f, %.2f)\n", 
                            hammerPosTarget[0], hammerPosTarget[1], hammerPosTarget[2]);
 
                     // 5. Define a direção alvo para a câmera e inicia a virada
