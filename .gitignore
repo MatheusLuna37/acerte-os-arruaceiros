@@ -1,2 +1,5 @@
 .vscode/
 *.exe
+include/
+output/
+src/
