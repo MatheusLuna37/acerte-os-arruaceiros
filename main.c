@@ -68,11 +68,11 @@ int screen_width = 1920;
 int screen_height = 1080;
 
 // Câmera e Mouse (VERSÃO PRIMEIRA PESSOA)
-vec3 cameraPos   = {30.0f, 8.0f, -10.0f}; // Posição dos "olhos" da professora. Sinta-se à vontade para ajustar!
+vec3 cameraPos   = {30.0f, 8.0f, 0.0f}; // Posição dos "olhos" da professora. Sinta-se à vontade para ajustar!
 vec3 cameraFront = {0.0f, 1.0f, 0.0f}; // Direção inicial para onde a câmera olha
 vec3 cameraUp    = {0.0f, 1.0f, 0.0f};  // Vetor "para cima"
 
-float cameraYaw = 160.0f; // Yaw inicial para olhar para o centro da sala (eixo -Z)
+float cameraYaw = 180.0f; // Yaw inicial para olhar para o centro da sala (eixo -Z)
 float cameraPitch = -20.0f;
 int lastX, lastY;
 int mouse_left_button_down = 0;
@@ -85,6 +85,7 @@ float cameraTurnProgress = 0.0f; // Progresso da virada da câmera (0.0 a 1.0)
 bool keyStates[256] = {false};
 
 Model* ourModel = NULL;
+Model* menModel = NULL; // Modelo do tronco (MEN.obj)
 
 // NOVO: Variáveis para o Martelo e sua Animação
 // NÃO precisamos mais carregar modelo .obj - usaremos primitivas OpenGL!
@@ -100,8 +101,64 @@ vec3 hammerPosCurrent = {35.0f, 6.0f, -6.0f}; // Posição atual no mundo 3D
 vec3 hammerPosTarget = {0.0f, 0.0f, 0.0f}; // Posição alvo no mundo 3D (calculada por ray cast)
 
 // Escala do martelo (varia com a distância)
-float hammerBaseScale = 1.0f; // Escala base do martelo (aumente para martelo maior)
-float hammerCurrentScale = 1.0f; // Escala atual (ajustada pela distância)
+float hammerBaseScale = 1.5f; // Escala base do martelo (aumentada para melhor visibilidade)
+float hammerCurrentScale = 1.5f; // Escala atual que aumenta com distância
+
+// --- TEXTURAS PARA CABEÇAS DOS BONECOS ---
+GLuint headTextures[4]; // 4 texturas, uma para cada tipo de boneco
+int texturesLoaded = 0; // Flag para saber se texturas foram carregadas
+
+// Função para carregar textura de arquivo
+GLuint loadTexture(const char* filename) {
+    int width, height, channels;
+    unsigned char* data = stbi_load(filename, &width, &height, &channels, 0);
+    
+    if (!data) {
+        printf("⚠️  Falha ao carregar textura: %s\n", filename);
+        return 0;
+    }
+    
+    GLuint textureID;
+    glGenTextures(1, &textureID);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+    
+    // Configurar parâmetros da textura
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    
+    // CRÍTICO: Ajustar alinhamento para imagens RGB (3 canais)
+    // OpenGL espera alinhamento de 4 bytes por padrão, mas RGB tem 3 bytes por pixel
+    if (channels == 3) {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    }
+    
+    // Enviar dados da textura para GPU
+    GLenum format = (channels == 4) ? GL_RGBA : GL_RGB;
+    glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+    
+    // Restaurar alinhamento padrão
+    if (channels == 3) {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    }
+    
+    stbi_image_free(data);
+    printf("✓ Textura carregada: %s (%dx%d, %d canais)\n", filename, width, height, channels);
+    return textureID;
+}
+
+// Função para inicializar texturas das cabeças
+void initHeadTextures() {
+    // Carregar 4 texturas, uma para cada tipo
+    headTextures[0] = loadTexture("textures/head_green.jpg");  // Tipo 0 (verde +1)
+    headTextures[1] = loadTexture("textures/head_blue.jpg");   // Tipo 1 (azul +2)
+    headTextures[2] = loadTexture("textures/head_red.jpg");    // Tipo 2 (vermelho -1)
+    headTextures[3] = loadTexture("textures/head_black.jpg");  // Tipo 3 (preto +4)
+    
+    texturesLoaded = 1;
+    printf("✓ Sistema de texturas inicializado!\n");
+}
 
 // --- SISTEMA WHACK-A-MOLE: Slots e Bonecos ---
 typedef struct {
@@ -118,12 +175,17 @@ int score = 0;
 int gameActive = 0; // 0 = modo livre (todos visíveis), 1 = modo jogo (um por vez)
 int currentActive = -1; // índice do slot atualmente visível
 int moleVisible = 0; // se o boneco está visível
-unsigned int moleShowMs = 900; // tempo visível em ms
-unsigned int moleIntervalMs = 400; // tempo entre aparições
+unsigned int moleShowMs = 1500; // tempo visível em ms (1.5 segundos)
+unsigned int moleIntervalMs = 600; // tempo entre aparições (0.6 segundos)
 
 int drawCubeMode = 1; // 1 = desenha bonecos, 0 = desenha quadrados verdes
 float slotOffsetX = 0.0f; // offset para ajuste fino
 float slotOffsetZ = 0.0f;
+
+// Protótipos de Model (devem vir antes de drawBoneco)
+void Model_Draw(Model* model);
+Model* Model_Create(const char* path);
+void Model_Destroy(Model* model);
 
 // Protótipos whack-a-mole
 void gameTick(int value);
@@ -250,13 +312,21 @@ void gameTick(int value) {
             glutTimerFunc(moleIntervalMs, gameTick, 0);
             return;
         }
+        // Escolhe slot aleatório (DIFERENTE do anterior sempre)
         int next = rand() % (int)numSlots;
-        if (numSlots > 1 && next == currentActive) {
-            next = (next + 1) % (int)numSlots;
+        int attempts = 0;
+        while (numSlots > 1 && next == currentActive && attempts < 10) {
+            next = rand() % (int)numSlots;
+            attempts++;
         }
+        
         currentActive = next;
         moleVisible = 1;
         slots[currentActive].clicked = 0;
+        
+        // MUDA O TIPO DO BONECO ALEATORIAMENTE a cada aparição!
+        slots[currentActive].type = rand() % 4; // 0=verde, 1=azul, 2=vermelho, 3=preto
+        
         glutTimerFunc(moleShowMs, gameTick, 0);
     }
     glutPostRedisplay();
@@ -322,9 +392,13 @@ void drawSlot(float x, float z) {
 }
 
 void drawBoneco(float x, float z) {
+    // Salva coordenadas originais ANTES de aplicar offsets
+    float origX = x;
+    float origZ = z;
+    
     float y = 0.01f;
     for (unsigned int i = 0; i < numSlots; i++) {
-        if (fabsf(slots[i].pos[0] - x) < 0.0001f && fabsf(slots[i].pos[2] - z) < 0.0001f) {
+        if (fabsf(slots[i].pos[0] - origX) < 0.0001f && fabsf(slots[i].pos[2] - origZ) < 0.0001f) {
             y = slots[i].pos[1];
             break;
         }
@@ -333,40 +407,93 @@ void drawBoneco(float x, float z) {
     float trunkWidth = 0.9f;
     float trunkHeight = 1.4f;
     float trunkDepth = 0.6f;
-    float headRadius = 0.35f;
+    float headRadius = 1.40f; // DOBRADO NOVAMENTE: era 0.70f (original 0.35f)
     
-    x += slotOffsetX;
+    x += slotOffsetX - 2.0f;  // Move todo o boneco (avançou de -3 para -2)
     z += slotOffsetZ;
     
     glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT);
     glDisable(GL_LIGHTING);
     glDisable(GL_TEXTURE_2D);
-    
-    // Cor baseada no tipo
+
+    // Busca o tipo do boneco usando coordenadas ORIGINAIS (antes dos offsets)
+    int bonecoType = 0;
     float trunkR = 0.8f, trunkG = 0.6f, trunkB = 0.3f;
     for (unsigned int i = 0; i < numSlots; i++) {
-        if (fabsf(slots[i].pos[0] - (x - slotOffsetX)) < 0.0001f && fabsf(slots[i].pos[2] - (z - slotOffsetZ)) < 0.0001f) {
+        if (fabsf(slots[i].pos[0] - origX) < 0.0001f && fabsf(slots[i].pos[2] - origZ) < 0.0001f) {
             int t = slots[i].type % 4;
-            if (t == 0) { trunkR = 0.0f; trunkG = 0.9f; trunkB = 0.0f; } // verde +1
-            else if (t == 1) { trunkR = 0.0f; trunkG = 0.0f; trunkB = 0.9f; } // azul +2
-            else if (t == 2) { trunkR = 0.9f; trunkG = 0.0f; trunkB = 0.0f; } // vermelho -1
-            else { trunkR = 0.05f; trunkG = 0.05f; trunkB = 0.05f; } // preto +4
+            bonecoType = t;
+            if (t == 0) { trunkR = 0.0f; trunkG = 0.9f; trunkB = 0.0f; }
+            else if (t == 1) { trunkR = 0.0f; trunkG = 0.0f; trunkB = 0.9f; }
+            else if (t == 2) { trunkR = 0.9f; trunkG = 0.0f; trunkB = 0.0f; }
+            else { trunkR = 0.05f; trunkG = 0.05f; trunkB = 0.05f; }
             break;
         }
     }
     
-    // Tronco
+    // Desenha a cabeça PRIMEIRO (para manter billboard funcionando)
     glPushMatrix();
-    glTranslatef(x, y + trunkHeight * 0.5f, z);
-    glColor3f(trunkR, trunkG, trunkB);
-    glScalef(trunkWidth, trunkHeight, trunkDepth);
-    glutSolidCube(1.0f);
+    // Centraliza cabeça com o tronco
+    float headX = x;
+    float headZ = z + 0.3f;  // Pequeno ajuste para frente
+    glTranslatef(headX, y + trunkHeight + headRadius, headZ);
+    
+    // === BILLBOARD: Faz a cabeça sempre olhar para a câmera ===
+    // Calcula vetor da cabeça para a câmera
+    vec3 headPos = {headX, y + trunkHeight + headRadius, headZ};
+    vec3 toCamera;
+    glm_vec3_sub(cameraPos, headPos, toCamera);
+    
+    // Billboard cilíndrico (só gira no eixo Y - mais natural para personagens)
+    // Ignora diferença de altura (Y) para rotação horizontal apenas
+    float dx = toCamera[0];
+    float dz = toCamera[2];
+    
+    // Calcula ângulo corretamente: atan2(x, z) retorna ângulo do vetor (x,z)
+    // Precisamos inverter o sinal para rotação correta do OpenGL
+    float angleY = glm_deg(atan2f(dx, dz));
+    
+    // Aplica rotação Y para fazer a cabeça olhar para a câmera
+    glRotatef(angleY, 0.0f, 1.0f, 0.0f);
+    
+    if (texturesLoaded) {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, headTextures[bonecoType]);
+        glColor3f(1.0f, 1.0f, 1.0f);
+        
+        // Rotações base para orientar textura (após billboard)
+        glRotatef(-90.0f, 1.0f, 0.0f, 0.0f);  // Corrige orientação vertical
+        glRotatef(0.0f, 0.0f, 0.0f, 1.0f);     // Sem rotação Z (billboard já controla orientação)
+        
+        GLUquadric* quad = gluNewQuadric();
+        gluQuadricTexture(quad, GL_TRUE);
+        gluQuadricOrientation(quad, GLU_OUTSIDE);
+        gluSphere(quad, headRadius, 32, 32);
+        gluDeleteQuadric(quad);
+        
+        glDisable(GL_TEXTURE_2D);
+    } else {
+        glutSolidSphere(headRadius, 16, 16);
+    }
+    
     glPopMatrix();
     
-    // Cabeça
+    // Desenha o tronco (MEN.obj ou cubo se não carregado)
     glPushMatrix();
-    glTranslatef(x, y + trunkHeight + headRadius, z);
-    glutSolidSphere(headRadius, 16, 16);
+    glTranslatef(x, y - trunkHeight * 0.7f, z); // Posiciona o tronco entre o chão e a cabeça
+    glColor3f(trunkR, trunkG, trunkB);
+    
+    if (menModel != NULL) {
+        glEnable(GL_LIGHTING);
+        glRotatef(90.0f, 0.0f, 1.0f, 0.0f); // Rotação de 90° no eixo Y
+        glScalef(2.0f, 2.0f, 2.0f); // Escala 2x
+        Model_Draw(menModel);
+        glDisable(GL_LIGHTING);
+    } else {
+        // Fallback: desenha cubo se MEN.obj não carregar
+        glScalef(trunkWidth, trunkHeight, trunkDepth);
+        glutSolidCube(1.0f);
+    }
     glPopMatrix();
     
     glPopAttrib();
@@ -468,34 +595,61 @@ int main(int argc, char** argv) {
     glShadeModel(GL_SMOOTH);
     
     stbi_set_flip_vertically_on_load(1);
+    
+    // Carrega modelo da sala
     ourModel = Model_Create(argv[1]);
     if (!ourModel) {
-        fprintf(stderr, "Falha ao carregar o modelo.\n");
+        fprintf(stderr, "Falha ao carregar o modelo da sala.\n");
         return -1;
+    }
+    
+    // Carrega modelo do tronco (MEN.obj)
+    printf("\n--- Carregando modelo do tronco dos bonecos ---\n");
+    menModel = Model_Create("MEN.obj");
+    if (!menModel) {
+        fprintf(stderr, "⚠️  Aviso: Falha ao carregar MEN.obj - usando cubos para troncos\n");
+    } else {
+        printf("✓ Modelo MEN.obj carregado com sucesso!\n");
     }
 
     // Martelo agora é desenhado com primitivas OpenGL - não precisa carregar modelo!
     printf("Martelo será desenhado com primitivas OpenGL (não requer arquivo .obj)\n");
+    
+    // Inicializa gerador de números aleatórios ANTES de carregar slots
+    srand((unsigned int)time(NULL));
     
     // Carrega slots (topeiras/bonecos) do arquivo
     FILE* fspots = fopen("spots.txt", "r");
     if (fspots) {
         fclose(fspots);
         if (loadSlotsFromFile("spots.txt")) {
-            printf("✓ Slots carregados! Tecla B = iniciar/parar jogo, V = alternar modo visual\n");
+            printf("✓ Slots carregados! Iniciando jogo automaticamente...\n");
+            printf("════════════════════════════════════════════════════════\n");
+            printf("  🎮 MODO WHACK-A-MOLE ATIVO!\n");
+            printf("  📍 Bonecos aparecem ALEATORIAMENTE em posições diferentes\n");
+            printf("  🎨 Tipos ALEATÓRIOS a cada aparição:\n");
+            printf("     🟢 Verde  = +1 ponto\n");
+            printf("     🔵 Azul   = +2 pontos\n");
+            printf("     🔴 Vermelho = -1 ponto (EVITE!)\n");
+            printf("     ⚫ Preto  = +4 pontos (RARO!)\n");
+            printf("  ⌨️  Tecla B = iniciar jogo | V = modo visual\n");
+            printf("════════════════════════════════════════════════════════\n");
+            // NÃO inicia o jogo automaticamente - pressione B para começar
+            // startGame();
         }
     } else {
         printf("⚠ spots.txt não encontrado - jogo sem bonecos\n");
     }
     
-    // Inicializa gerador de números aleatórios
-    srand((unsigned int)time(NULL));
+    // Inicializa texturas das cabeças dos bonecos
+    initHeadTextures();
     
     // --- Registro de Callbacks e Loop Principal ---
     glutDisplayFunc(renderScene);
     glutReshapeFunc(reshape);
     glutMouseFunc(mouseButton);
-    glutMotionFunc(mouseMove);
+    glutPassiveMotionFunc(mouseMove);  // Movimento SEM clicar
+    glutMotionFunc(mouseMove);          // Movimento COM clicar (mantido para compatibilidade)
     glutKeyboardFunc(keyboardDown);
     glutKeyboardUpFunc(keyboardUp);
     atexit(cleanup);
@@ -512,8 +666,8 @@ void renderScene(void) {
     processKeyboard();
 
     // 1. Atualiza a animação do martelo (lógica movida para o topo)
-    float moveSpeed = 0.04f; // Velocidade de movimento
-    float swingSpeed = 1.5f; // Velocidade de batida
+    float moveSpeed = 0.02f; // Velocidade de movimento
+    float swingSpeed = 1.2f; // Velocidade de batida
     
     if (hammerState == MOVING_TO_TARGET) {
         // Só move o martelo se a câmera já tiver virado pelo menos 60%
@@ -530,12 +684,12 @@ void renderScene(void) {
             // Interpolação da posição 3D (lerp vetorial)
             glm_vec3_lerp(hammerPosStart, hammerPosTarget, hammerAnimationMovingtoTarget, hammerPosCurrent);
             
-            // Calcula a escala baseada na distância da câmera (perspectiva suave)
+            // Aumenta a escala com distância para compensar perspectiva
+            // Mantém tamanho visual mais constante independente da distância
             float distanceToCamera = glm_vec3_distance(cameraPos, hammerPosCurrent);
-            // Quanto mais longe, menor o martelo parece (perspectiva MUITO suave)
-            // Escala varia de 0.9x a 1.0x baseado na distância (10 a 100 unidades)
-            // Variação mínima para o martelo não ficar muito pequeno
-            float distanceFactor = glm_clamp(1.0f - ((distanceToCamera - 10.0f) / 100.0f) * 0.1f, 0.9f, 1.0f);
+            // Cresce até 2.5x em distâncias grandes (50 unidades+)
+            float distanceFactor = 1.0f + ((distanceToCamera - 10.0f) / 20.0f);
+            distanceFactor = glm_clamp(distanceFactor, 1.0f, 4.5f);
             hammerCurrentScale = hammerBaseScale * distanceFactor;
         }
         
@@ -593,8 +747,8 @@ void renderScene(void) {
         
     } else if (hammerState == SWINGING_UP) {
         hammerAnimationAngle -= swingSpeed;
-        if (hammerAnimationAngle <= 0.0f) {
-            hammerAnimationAngle = 0.0f;
+        if (hammerAnimationAngle <= -10.0f) {
+            hammerAnimationAngle = -10.0f;
             hammerState = RETURNING;
         }
         
@@ -604,17 +758,52 @@ void renderScene(void) {
         if (hammerAnimationMovingtoTarget <= 0.0f) {
             hammerAnimationMovingtoTarget = 0.0f;
             hammerState = IDLE;
-            glm_vec3_copy(hammerPosStart, hammerPosCurrent);
             hammerCurrentScale = hammerBaseScale;
         } else {
             // Interpolação da posição 3D durante retorno
             glm_vec3_lerp(hammerPosStart, hammerPosTarget, hammerAnimationMovingtoTarget, hammerPosCurrent);
             
-            // Atualiza escala durante retorno (mesma fórmula suave)
+            // Mesma lógica de escala crescente durante retorno
             float distanceToCamera = glm_vec3_distance(cameraPos, hammerPosCurrent);
-            float distanceFactor = glm_clamp(1.0f - ((distanceToCamera - 10.0f) / 50.0f) * 0.25f, 0.75f, 1.0f);
+            float distanceFactor = 1.0f + ((distanceToCamera - 10.0f) / 40.0f);
+            distanceFactor = glm_clamp(distanceFactor, 1.0f, 2.5f);
             hammerCurrentScale = hammerBaseScale * distanceFactor;
         }
+    }
+    
+    // Quando IDLE ou RETURNING perto do fim, martelo acompanha a câmera (estilo FPS)
+    if (hammerState == IDLE || (hammerState == RETURNING && hammerAnimationMovingtoTarget < 0.1f)) {
+        // Calcula posição do martelo relativa à câmera
+        // Posiciona à direita e abaixo do centro da visão
+        vec3 right, down, forward;
+        
+        // Vetor para direita (perpendicular a cameraFront e cameraUp)
+        glm_vec3_cross(cameraFront, cameraUp, right);
+        glm_vec3_normalize(right);
+        
+        // Vetor para baixo (inverso do up)
+        glm_vec3_negate_to(cameraUp, down);
+        
+        // Copia direção frontal
+        glm_vec3_copy(cameraFront, forward);
+        
+        // Posição base = câmera + um pouco à frente
+        glm_vec3_copy(cameraPos, hammerPosCurrent);
+        glm_vec3_scale(forward, 3.0f, forward);  // 3 unidades à frente
+        glm_vec3_add(hammerPosCurrent, forward, hammerPosCurrent);
+        
+        // Desloca para direita (2 unidades)
+        glm_vec3_scale(right, 2.0f, right);
+        glm_vec3_add(hammerPosCurrent, right, hammerPosCurrent);
+        
+        // Desloca para baixo (0.5 unidades) - REDUZIDO para ficar mais visível
+        glm_vec3_scale(down, 0.5f, down);
+        glm_vec3_add(hammerPosCurrent, down, hammerPosCurrent);
+        
+        // Atualiza hammerPosStart para quando iniciar próximo ataque
+        glm_vec3_copy(hammerPosCurrent, hammerPosStart);
+        
+        hammerCurrentScale = hammerBaseScale * 0.8f; // Menor quando em repouso
     }
 
     // 2. Atualiza a mira da câmera se ela estiver virando
@@ -648,10 +837,9 @@ void renderScene(void) {
         }
     }
 
-    // Força o redesenho se a câmera ou o martelo estiverem se movendo
-    if (isCameraTurning || hammerState != IDLE) {
-        glutPostRedisplay();
-    }
+    // Força o redesenho continuamente para martelo acompanhar câmera
+    // (mesmo em IDLE, o martelo precisa seguir os movimentos da câmera)
+    glutPostRedisplay();
 
     glClearColor(0.2f, 0.3f, 0.5f, 1.0f); // Um azul céu
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -718,32 +906,47 @@ void renderScene(void) {
     // Move o martelo para sua posição atual no mundo 3D
     glTranslatef(hammerPosCurrent[0], hammerPosCurrent[1], hammerPosCurrent[2]);
     
-    // Calcula a direção do alvo para orientar o martelo
-    vec3 hammerToTarget;
-    glm_vec3_sub(hammerPosTarget, hammerPosCurrent, hammerToTarget);
-    
-    // Se ainda está se movendo, aponta para o alvo
-    if (hammerState != IDLE && glm_vec3_norm(hammerToTarget) > 0.01f) {
-        glm_vec3_normalize(hammerToTarget);
+    // Orienta o martelo baseado no estado
+    if (hammerState == IDLE || (hammerState == RETURNING && hammerAnimationMovingtoTarget < 0.1f)) {
+        // Em IDLE: aponta na mesma direção da câmera
+        float yaw = glm_deg(atan2f(cameraFront[0], cameraFront[2]));
+        float pitch = glm_deg(asinf(-cameraFront[1]));
         
-        // Calcula ângulos de rotação para apontar para o alvo
-        float yaw = glm_deg(atan2f(hammerToTarget[0], hammerToTarget[2]));
-        float pitch = glm_deg(asinf(-hammerToTarget[1]));
+        glRotatef(yaw, 0.0f, 1.0f, 0.0f);   // Rotação horizontal (segue câmera)
+        glRotatef(pitch, 1.0f, 0.0f, 0.0f); // Rotação vertical (segue câmera)
+        glRotatef(90.0f, 0.0f, 1.0f, 0.0f); // Gira 90° para ficar de frente
         
-        glRotatef(yaw, 0.0f, 1.0f, 0.0f);   // Rotação horizontal
-        glRotatef(pitch, 1.0f, 0.0f, 0.0f); // Rotação vertical
+    } else {
+        // Em ataque: aponta para o alvo
+        vec3 hammerToTarget;
+        glm_vec3_sub(hammerPosTarget, hammerPosCurrent, hammerToTarget);
+        
+        if (glm_vec3_norm(hammerToTarget) > 0.01f) {
+            glm_vec3_normalize(hammerToTarget);
+            
+            // Calcula ângulos de rotação para apontar para o alvo
+            float yaw = glm_deg(atan2f(hammerToTarget[0], hammerToTarget[2]));
+            float pitch = glm_deg(asinf(-hammerToTarget[1]));
+            
+            glRotatef(yaw, 0.0f, 1.0f, 0.0f);   // Rotação horizontal
+            glRotatef(pitch, 1.0f, 0.0f, 0.0f); // Rotação vertical
+        }
     }
-
-    // Aplica a animação de batida ANTES da rotação final
-    // Isso faz o martelo girar em torno do cabo (pivô no cabo)
-    glRotatef(hammerAnimationAngle, 1.0f, 0.0f, 0.0f);
 
     // Escala o martelo baseada na distância (perspectiva automática)
     glScalef(hammerCurrentScale, hammerCurrentScale, hammerCurrentScale);
 
-    // IMPORTANTE: Offset para que a CABEÇA (y=2.5 local) fique no alvo, não o cabo (y=0)
-    // Movemos o martelo -2.5 unidades em Y local para compensar
-    glTranslatef(0.0f, -2.5f, 0.0f);
+    // ESTRATÉGIA: Fazer o cabo ser o pivô fixo e a cabeça girar para atingir o alvo
+    // Ordem de transformações (lembre: OpenGL aplica de BAIXO para CIMA):
+    
+    glTranslatef(0.0f, -2.5f, 0.0f); // Move o martelo para BAIXO (cabo em 0,0,0)
+    // 1. Rotaciona PRIMEIRO em torno da origem (marretada)
+    //    A origem será onde o cabo fica (pivô fixo)
+    glRotatef(hammerAnimationAngle, 0.0f, 0.0f, 1.0f);
+    
+    // 2. Move o martelo para BAIXO para que a CABEÇA fique no alvo
+    //    drawHammer() desenha cabo em (0,0,0) e cabeça em (0,2.5,0)
+    //    Movemos -2.5 em Y: cabo em (0,-2.5,0) e cabeça em (0,0,0) = ALVO!
 
     // Desenha o martelo com primitivas OpenGL
     drawHammer();
@@ -820,18 +1023,23 @@ void mouseButton(int button, int state, int x, int y) {
             glm_vec3_sub(ray_far, ray_origin, ray_dir);
             glm_vec3_normalize(ray_dir);
 
-            // 4. Calcula a interseção do raio com o plano do chão (y=0)
+            // 4. Calcula a interseção do raio com o plano das CABEÇAS dos bonecos (y≈2.8)
             bool targetFound = false;
+            // Altura do centro das cabeças: base (0.01) + trunk (1.4) + headRadius (1.4) = 2.81
+            float targetHeight = 2.8f;
+            
             if (fabs(ray_dir[1]) > 0.001f) {
-                float t = -ray_origin[1] / ray_dir[1];
+                // Calcula t para interseção com plano y = targetHeight
+                // Equação: ray_origin.y + t * ray_dir.y = targetHeight
+                float t = (targetHeight - ray_origin[1]) / ray_dir[1];
                 if (t > 0) { // Apenas se o ponto está à frente da câmera
                     vec3 targetPoint;
                     glm_vec3_scale(ray_dir, t, targetPoint);
                     glm_vec3_add(ray_origin, targetPoint, targetPoint);
                     
-                    // Define o alvo 3D do martelo (ligeiramente acima do chão)
+                    // Define o alvo 3D do martelo na altura das cabeças
                     glm_vec3_copy(targetPoint, hammerPosTarget);
-                    hammerPosTarget[1] = 0.5f; // Altura ligeiramente acima do chão
+                    hammerPosTarget[1] = targetHeight; // Mantém altura das cabeças
                     targetFound = true;
                     
                     printf("🎯 Alvo do martelo: (%.2f, %.2f, %.2f)\n", 
@@ -885,16 +1093,14 @@ void mouseMove(int x, int y) {
     lastX = x;
     lastY = y;
 
-    // Apenas aplica a rotação se o botão esquerdo estiver pressionado
-    if (mouse_left_button_down) {
-        float sensitivity = 0.1f; // Sensibilidade pode ser ajustada
-        cameraYaw += dx * sensitivity;
-        cameraPitch += dy * sensitivity;
+    // Aplica a rotação SEMPRE (sem precisar clicar)
+    float sensitivity = 0.1f; // Sensibilidade pode ser ajustada
+    cameraYaw += dx * sensitivity;
+    cameraPitch += dy * sensitivity;
 
-        // Limita a rotação vertical para não "virar de cabeça para baixo"
-        if (cameraPitch > 89.0f) cameraPitch = 89.0f;
-        if (cameraPitch < -89.0f) cameraPitch = -89.0f;
-    }
+    // Limita a rotação vertical para não "virar de cabeça para baixo"
+    if (cameraPitch > 89.0f) cameraPitch = 89.0f;
+    if (cameraPitch < -89.0f) cameraPitch = -89.0f;
 
     glutPostRedisplay(); // Solicita um redesenho da cena
 }
@@ -902,6 +1108,7 @@ void mouseMove(int x, int y) {
 void cleanup(void) {
     printf("Limpando recursos...\n");
     Model_Destroy(ourModel);
+    Model_Destroy(menModel); // Libera modelo do tronco
     // Martelo agora é primitiva OpenGL - não precisa destruir modelo
 }
 
