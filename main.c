@@ -177,6 +177,9 @@ int currentActive = -1; // índice do slot atualmente visível
 int moleVisible = 0; // se o boneco está visível
 unsigned int moleShowMs = 1500; // tempo visível em ms (1.5 segundos)
 unsigned int moleIntervalMs = 600; // tempo entre aparições (0.6 segundos)
+// Tempo da partida
+unsigned int gameDurationMs = 30000; // duração padrão da partida em ms (30s)
+unsigned int gameEndTime = 0; // timestamp GLUT (ms) quando a partida termina
 
 int drawCubeMode = 1; // 1 = desenha bonecos, 0 = desenha quadrados verdes
 float slotOffsetX = 0.0f; // offset para ajuste fino
@@ -338,6 +341,8 @@ void startGame() {
     score = 0;
     currentActive = -1;
     moleVisible = 0;
+    // inicia timer de partida
+    gameEndTime = (unsigned int)glutGet(GLUT_ELAPSED_TIME) + gameDurationMs;
     glutTimerFunc(moleIntervalMs, gameTick, 0);
 }
 
@@ -346,6 +351,7 @@ void stopGame() {
     gameActive = 0;
     currentActive = -1;
     moleVisible = 0;
+    gameEndTime = 0;
     glutPostRedisplay();
 }
 
@@ -959,6 +965,20 @@ void renderScene(void) {
     // --- Desenha Score HUD ---
     char scoreStr[64];
     sprintf(scoreStr, "Score: %d", score);
+
+    // calcula tempo restante
+    unsigned int now = (unsigned int)glutGet(GLUT_ELAPSED_TIME);
+    int timeRemainingMs = 0;
+    if (gameActive && gameEndTime > now) {
+        timeRemainingMs = (int)(gameEndTime - now);
+    } else if (gameActive && gameEndTime != 0 && gameEndTime <= now) {
+        // tempo esgotado
+        stopGame();
+        timeRemainingMs = 0;
+    }
+    char timeStr[64];
+    int timeSec = (timeRemainingMs + 500) / 1000; // arredonda para segundos
+    sprintf(timeStr, "Time: %ds", timeSec);
     
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
@@ -969,10 +989,12 @@ void renderScene(void) {
     glLoadIdentity();
     
     glColor3f(1.0f, 1.0f, 1.0f);
+    // Score
     glRasterPos2i(10, screen_height - 20);
-    for (char* c = scoreStr; *c; c++) {
-        glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
-    }
+    for (char* c = scoreStr; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+    // Time (posicionado à direita do score)
+    glRasterPos2i(160, screen_height - 20);
+    for (char* c = timeStr; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
     
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
