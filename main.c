@@ -69,8 +69,8 @@ vec3 cameraPos   = {30.0f, 8.0f, 0.0f}; // Posição dos "olhos" da professora. 
 vec3 cameraFront = {0.0f, 1.0f, 0.0f}; // Direção inicial para onde a câmera olha
 vec3 cameraUp    = {0.0f, 1.0f, 0.0f};  // Vetor "para cima"
 
-float cameraYaw = 180.0f; // Yaw inicial para olhar para o centro da sala (eixo -Z)
-float cameraPitch = -20.0f;
+float cameraYaw = 95.0f; // Yaw inicial para olhar para o centro da sala (eixo -Z)
+float cameraPitch = 40.0f;
 int lastX, lastY;
 int mouse_left_button_down = 0;
 
@@ -162,7 +162,7 @@ int showFinalModal = 0;
 int gameActive = 0;
 int currentActive = -1;
 int moleVisible = 0;
-unsigned int moleShowMs = 1500;
+unsigned int moleShowMs = 1000;  // Reduzido de 1500ms para 1000ms (2/3 do tempo original)
 unsigned int moleIntervalMs = 600;
 
 // Timer
@@ -819,8 +819,8 @@ void renderScene(void) {
     processKeyboard();
 
     // Atualiza animação do martelo
-    float moveSpeed = 0.02f; // Velocidade de movimento
-    float swingSpeed = 1.2f; // Velocidade de batida
+    float moveSpeed = 0.04f; // Velocidade de movimento
+    float swingSpeed = 1.5f; // Velocidade de batida
     
     if (hammerState == MOVING_TO_TARGET) {
         // Só move o martelo se a câmera já tiver virado pelo menos 60%
@@ -875,9 +875,9 @@ void renderScene(void) {
                 
                 if (dist <= hitRadius && !slots[i].clicked) {
                     slots[i].clicked = 1;
-                    int points = (slots[i].type == 0) ? 2 : 
+                    int points = (slots[i].type == 0) ? 3 : 
                                 (slots[i].type == 1) ? 1 :
-                                (slots[i].type == 2) ? -1 : 4;
+                                (slots[i].type == 2) ? -5 : 2;
                     score += points;
               printf("ACERTOU! Slot %d Tipo %d = %+d pts | Score: %d | Dist: %.2f\n", 
                   i, slots[i].type, points, score, dist);
