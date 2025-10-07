@@ -1,17 +1,11 @@
-// ===================================================================================
-// main.c - Visualizador de Modelos .obj em C (VERSÃO OPENGL LEGADO - COMPLETO)
-//
-// BIBLIOTECAS: freeglut, GLAD, Assimp (C-API), stb_image, cglm
-//
-// COMO COMPILAR (usando gcc no MSYS2/MinGW com pacotes do Pacman):
-// gcc -o visualizador.exe main.c glad.c -lfreeglut -lopengl32 -lassimp -lgdi32 -lm
-// NOTA: Adicionei glad.c ao comando de compilação, se você o tiver separado.
-// ===================================================================================
+// main.c - Whack-a-Mole / visualizador (OpenGL legado)
+// Dependências: freeglut, glad, assimp, stb_image, cglm
+// Arquivo principal do jogo e renderizador. Comentários resumidos.
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h> // <-- ADICIONE AQUI
+#include <time.h> 
 
 #include <glad/glad.h>
 #include <GL/freeglut.h>
@@ -25,8 +19,11 @@
 #include <assimp/cimport.h>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
-// --- Estruturas de Dados ---
+// --- Estruturas de dados ---
 
 typedef struct {
     vec3 position;
@@ -67,7 +64,7 @@ typedef struct {
 int screen_width = 1920;
 int screen_height = 1080;
 
-// Câmera e Mouse (VERSÃO PRIMEIRA PESSOA)
+// Camera
 vec3 cameraPos   = {30.0f, 8.0f, 0.0f}; // Posição dos "olhos" da professora. Sinta-se à vontade para ajustar!
 vec3 cameraFront = {0.0f, 1.0f, 0.0f}; // Direção inicial para onde a câmera olha
 vec3 cameraUp    = {0.0f, 1.0f, 0.0f};  // Vetor "para cima"
@@ -77,44 +74,38 @@ float cameraPitch = -20.0f;
 int lastX, lastY;
 int mouse_left_button_down = 0;
 
-// NOVO: Variáveis para a mira automática da câmera
-vec3 cameraTargetDirection; // A direção final para onde a câmera deve olhar
-bool isCameraTurning = false; // Flag que controla se a câmera está no meio de uma virada
-float cameraTurnProgress = 0.0f; // Progresso da virada da câmera (0.0 a 1.0)
+// Camera turning
+vec3 cameraTargetDirection;
+bool isCameraTurning = false;
+float cameraTurnProgress = 0.0f;
 
 bool keyStates[256] = {false};
 
 Model* ourModel = NULL;
 Model* menModel = NULL; // Modelo do tronco (MEN.obj)
 
-// NOVO: Variáveis para o Martelo e sua Animação
-// NÃO precisamos mais carregar modelo .obj - usaremos primitivas OpenGL!
-float hammerAnimationAngle = 0.0f; // Ângulo atual da animação de batida
-float hammerAnimationMovingtoTarget = 0.0f; // Progresso da animação (0.0 a 1.0)
-// Enum para controlar o estado da animação
+// Hammer animation
+float hammerAnimationAngle = 0.0f;
+float hammerAnimationMovingtoTarget = 0.0f;
 typedef enum { IDLE, MOVING_TO_TARGET, SWINGING_DOWN, SWINGING_UP, RETURNING } HammerState;
 HammerState hammerState = IDLE;
+vec3 hammerPosStart = {35.0f, 6.0f, -6.0f};
+vec3 hammerPosCurrent = {35.0f, 6.0f, -6.0f};
+vec3 hammerPosTarget = {0.0f, 0.0f, 0.0f};
+float hammerBaseScale = 1.5f;
+float hammerCurrentScale = 1.5f;
 
-// Posição do martelo no ESPAÇO 3D DA CENA (coordenadas mundiais)
-vec3 hammerPosStart = {35.0f, 6.0f, -6.0f}; // Posição inicial (será atualizada dinamicamente)
-vec3 hammerPosCurrent = {35.0f, 6.0f, -6.0f}; // Posição atual no mundo 3D
-vec3 hammerPosTarget = {0.0f, 0.0f, 0.0f}; // Posição alvo no mundo 3D (calculada por ray cast)
-
-// Escala do martelo (varia com a distância)
-float hammerBaseScale = 1.5f; // Escala base do martelo (aumentada para melhor visibilidade)
-float hammerCurrentScale = 1.5f; // Escala atual que aumenta com distância
-
-// --- TEXTURAS PARA CABEÇAS DOS BONECOS ---
+// Head textures
 GLuint headTextures[4]; // 4 texturas, uma para cada tipo de boneco
 int texturesLoaded = 0; // Flag para saber se texturas foram carregadas
 
-// Função para carregar textura de arquivo
+// Carrega textura de arquivo
 GLuint loadTexture(const char* filename) {
     int width, height, channels;
     unsigned char* data = stbi_load(filename, &width, &height, &channels, 0);
     
     if (!data) {
-        printf("⚠️  Falha ao carregar textura: %s\n", filename);
+    printf("Falha ao carregar textura: %s\n", filename);
         return 0;
     }
     
@@ -122,45 +113,40 @@ GLuint loadTexture(const char* filename) {
     glGenTextures(1, &textureID);
     glBindTexture(GL_TEXTURE_2D, textureID);
     
-    // Configurar parâmetros da textura
+    // parâmetros da textura
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     
-    // CRÍTICO: Ajustar alinhamento para imagens RGB (3 canais)
-    // OpenGL espera alinhamento de 4 bytes por padrão, mas RGB tem 3 bytes por pixel
+    // Ajusta alinhamento para imagens RGB (3 canais)
     if (channels == 3) {
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
     }
     
-    // Enviar dados da textura para GPU
+    // envia os dados
     GLenum format = (channels == 4) ? GL_RGBA : GL_RGB;
     glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
     
-    // Restaurar alinhamento padrão
+    // restaura alinhamento
     if (channels == 3) {
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     }
     
     stbi_image_free(data);
-    printf("✓ Textura carregada: %s (%dx%d, %d canais)\n", filename, width, height, channels);
+    printf("Textura carregada: %s (%dx%d, %d canais)\n", filename, width, height, channels);
     return textureID;
 }
 
-// Função para inicializar texturas das cabeças
 void initHeadTextures() {
-    // Carregar 4 texturas, uma para cada tipo
-    headTextures[0] = loadTexture("textures/head_green.jpg");  // Tipo 0 (verde +1)
-    headTextures[1] = loadTexture("textures/head_blue.jpg");   // Tipo 1 (azul +2)
-    headTextures[2] = loadTexture("textures/head_red.jpg");    // Tipo 2 (vermelho -1)
-    headTextures[3] = loadTexture("textures/head_black.jpg");  // Tipo 3 (preto +4)
-    
+    headTextures[0] = loadTexture("textures/head_green.jpg");
+    headTextures[1] = loadTexture("textures/head_blue.jpg");
+    headTextures[2] = loadTexture("textures/head_red.jpg");
+    headTextures[3] = loadTexture("textures/head_black.jpg");
     texturesLoaded = 1;
-    printf("✓ Sistema de texturas inicializado!\n");
 }
 
-// --- SISTEMA WHACK-A-MOLE: Slots e Bonecos ---
+// Whack-a-Mole: slots
 typedef struct {
     vec3 pos; // x, y, z (posição no mundo)
     int clicked; // 0 = não clicado, 1 = já clicado
@@ -170,21 +156,106 @@ typedef struct {
 Slot* slots = NULL;
 unsigned int numSlots = 0;
 int score = 0;
+// Modal final
+int showFinalModal = 0;
 
-// Lógica do jogo
-int gameActive = 0; // 0 = modo livre (todos visíveis), 1 = modo jogo (um por vez)
-int currentActive = -1; // índice do slot atualmente visível
-int moleVisible = 0; // se o boneco está visível
-unsigned int moleShowMs = 1500; // tempo visível em ms (1.5 segundos)
-unsigned int moleIntervalMs = 600; // tempo entre aparições (0.6 segundos)
-// duração da partida (ms) - definido para 60 segundos por solicitação
+int gameActive = 0;
+int currentActive = -1;
+int moleVisible = 0;
+unsigned int moleShowMs = 1500;
+unsigned int moleIntervalMs = 600;
+
+// Timer
 unsigned int gameDurationMs = 60000;
+unsigned int gameEndTimeMs = 0;
+unsigned int pausedRemainingMs = 0;
+int isPaused = 0;
+
+// Menu
+int inMenu = 1;
+int menuSelected = 0;
+int menuOptionCount = 6;
+int menuDurations[] = {30, 60, 120};
+int menuDurationIndex = 1;
+
+// Histórico display
+int sortByScore = 0;
+int recordsPerPage = 6;
+int historyPage = 0;
+int showScoresMenu = 0; // quando 1, exibe só a lista de pontuações no menu
+
+#define MATCH_HISTORY_MAX 100
+#define MATCH_HISTORY_MAX 100
+typedef struct { int score; char timeStr[32]; } MatchRecord;
+MatchRecord matchHistory[MATCH_HISTORY_MAX];
+int matchHistoryCount = 0;
+
+// Persiste histórico em scores.txt: "YYYY-MM-DD HH:MM:SS <score>"
+void saveMatchHistoryToFile() {
+    FILE* f = fopen("scores.txt", "w");
+    if (!f) { fprintf(stderr, "Falha ao salvar scores.txt\n"); return; }
+    for (int i = 0; i < matchHistoryCount; i++) {
+        fprintf(f, "%s %d\n", matchHistory[i].timeStr, matchHistory[i].score);
+    }
+    fclose(f);
+}
+
+// Carrega histórico de arquivo (scores.txt)
+void loadMatchHistoryFromFile() {
+    FILE* f = fopen("scores.txt", "r");
+    if (!f) return; 
+    char line[128];
+    matchHistoryCount = 0;
+    while (fgets(line, sizeof(line), f) && matchHistoryCount < MATCH_HISTORY_MAX) {
+        char timestr[64]; int s;
+        if (sscanf(line, "%63[0-9-: ] %d", timestr, &s) >= 1) {
+            char* last = strrchr(line, ' ');
+            if (last) {
+                s = atoi(last+1);
+                char buf[64];
+                int len = (int)(last - line);
+                if (len > 63) len = 63;
+                strncpy(buf, line, len);
+                buf[len] = '\0';
+                while (len>0 && (buf[len-1]==' ' || buf[len-1]=='\n' || buf[len-1]=='\r')) { buf[--len]='\0'; }
+                strncpy(matchHistory[matchHistoryCount].timeStr, buf, sizeof(matchHistory[matchHistoryCount].timeStr)-1);
+                matchHistory[matchHistoryCount].timeStr[sizeof(matchHistory[matchHistoryCount].timeStr)-1]='\0';
+                matchHistory[matchHistoryCount].score = s;
+                matchHistoryCount++;
+            }
+        }
+    }
+    fclose(f);
+}
+
+// Adiciona registro e salva
+void addMatchRecord(int s) {
+    time_t now = time(NULL);
+    struct tm tmnow;
+    localtime_s(&tmnow, &now);
+    char timestr[32];
+    strftime(timestr, sizeof(timestr), "%Y-%m-%d %H:%M:%S", &tmnow);
+
+    if (matchHistoryCount < MATCH_HISTORY_MAX) {
+        strncpy(matchHistory[matchHistoryCount].timeStr, timestr, sizeof(matchHistory[matchHistoryCount].timeStr)-1);
+        matchHistory[matchHistoryCount].timeStr[sizeof(matchHistory[matchHistoryCount].timeStr)-1] = '\0';
+        matchHistory[matchHistoryCount].score = s;
+        matchHistoryCount++;
+    } else {
+        for (int i = 1; i < MATCH_HISTORY_MAX; i++) matchHistory[i-1] = matchHistory[i];
+        strncpy(matchHistory[MATCH_HISTORY_MAX-1].timeStr, timestr, sizeof(matchHistory[MATCH_HISTORY_MAX-1].timeStr)-1);
+        matchHistory[MATCH_HISTORY_MAX-1].timeStr[sizeof(matchHistory[MATCH_HISTORY_MAX-1].timeStr)-1]='\0';
+        matchHistory[MATCH_HISTORY_MAX-1].score = s;
+    }
+    saveMatchHistoryToFile();
+    printf("Placar registrado: %d (registros=%d)\n", s, matchHistoryCount);
+}
 
 int drawCubeMode = 1; // 1 = desenha bonecos, 0 = desenha quadrados verdes
 float slotOffsetX = 0.0f; // offset para ajuste fino
 float slotOffsetZ = 0.0f;
 
-// Protótipos de Model (devem vir antes de drawBoneco)
+// Protótipos de Model 
 void Model_Draw(Model* model);
 Model* Model_Create(const char* path);
 void Model_Destroy(Model* model);
@@ -200,28 +271,116 @@ void drawBoneco(float x, float z);
 void drawBonecoAtIndex(unsigned int idx);
 int loadSlotsFromFile(const char* path);
 
-// ===================================================================================
-// FUNÇÕES DE INPUT (TECLADO)
-// ===================================================================================
+// ---- Input (teclado) ----
 
-// Chamada quando uma tecla é pressionada
+// keyboardDown: trata entradas do teclado. Protótipos de menu abaixo.
+void openMenu(void);
+void closeMenu(void);
+void specialKeyDown(int key, int x, int y);
 void keyboardDown(unsigned char key, int x, int y) {
     if ((unsigned char)key < 256) keyStates[(unsigned char)key] = true;
+    // Se o modal de Pontuações estiver aberto, teclas como Enter/Esc/M fecham-no
+    if (showScoresMenu) {
+        if (key == '\r' || key == '\n' || key == 27 || key == 'm' || key == 'M') {
+            showScoresMenu = 0;
+            glutPostRedisplay();
+            return;
+        }
+        // Navegação por teclado no modal: 't' avança página, 'T' volta
+        if (key == 't' || key == 'T') {
+            int total = matchHistoryCount;
+            int pages = (total + recordsPerPage - 1) / recordsPerPage;
+            if (pages <= 0) pages = 1;
+            if (key == 't' && historyPage < pages - 1) { historyPage++; glutPostRedisplay(); }
+            else if (key == 'T' && historyPage > 0) { historyPage--; glutPostRedisplay(); }
+            return;
+        }
+    }
     
     // Teclas especiais do jogo
     if (key == 'b' || key == 'B') {
+        // B apenas inicia ou para completamente o jogo
         if (gameActive) {
             stopGame();
-            printf("⏸ Jogo pausado\n");
+            printf("⏹ Jogo parado\n");
         } else {
             startGame();
-            printf("▶ Jogo iniciado!\n");
+            printf("Jogo iniciado\n");
+        }
+    } else if (key == 'p' || key == 'P') {
+        // P pausa/resume preservando tempo
+        if (gameActive && !isPaused) {
+            unsigned int now = glutGet(GLUT_ELAPSED_TIME);
+            if (gameEndTimeMs > now) pausedRemainingMs = gameEndTimeMs - now;
+            else pausedRemainingMs = 0;
+            isPaused = 1;
+            gameActive = 0; // desativa o modo jogo mas mantém estado pausado
+            printf("Jogo pausado (restam %u ms)\n", pausedRemainingMs);
+        } else if (!gameActive && isPaused) {
+            // Resume
+            startGame();
+            printf("▶ Jogo retomado\n");
         }
     } else if (key == 'v' || key == 'V') {
         drawCubeMode = !drawCubeMode;
         printf("Modo visual: %s\n", drawCubeMode ? "Bonecos 3D" : "Quadrados verdes");
         glutPostRedisplay();
+    } else if (key == 'm' || key == 'M' || key == 27) { // 'm' or ESC to toggle menu
+        if (inMenu) closeMenu(); else openMenu();
+        glutPostRedisplay();
+    } else if ((key == '\r' || key == '\n' || key == ' ') && inMenu) {
+        // Enter/Space confirm selection in menu
+        if (menuSelected == 0) {
+            // Iniciar jogo
+            // Apply selected duration
+            gameDurationMs = menuDurations[menuDurationIndex] * 1000;
+            startGame();
+        } else if (menuSelected == 1) {
+            // Ajustar duração: cycle
+            menuDurationIndex = (menuDurationIndex + 1) % (sizeof(menuDurations)/sizeof(menuDurations[0]));
+            printf("Duração selecionada: %d s\n", menuDurations[menuDurationIndex]);
+        } else if (menuSelected == 2) {
+            // Alterna modo visual
+            drawCubeMode = !drawCubeMode;
+            printf("Modo visual: %s\n", drawCubeMode ? "Bonecos 3D" : "Quadrados verdes");
+        } else if (menuSelected == 3) {
+            // Toggle ordenação
+            sortByScore = !sortByScore;
+            printf("Ordenação: %s\n", sortByScore ? "Melhores scores" : "Mais recentes");
+            historyPage = 0;
+        } else if (menuSelected == 4) {
+            // Abrir submenu de pontuações
+            showScoresMenu = 1; historyPage = 0;
+        } else if (menuSelected == 5) {
+            // Sair do jogo
+            exit(0);
+        }
+        glutPostRedisplay();
     }
+    // Dismiss final modal with Enter
+    if (showFinalModal && (key == '\r' || key == '\n')) {
+        showFinalModal = 0;
+        // finalize and return to menu
+        stopGame();
+        glutPostRedisplay();
+    }
+}
+
+// Navegação por setas no menu
+void specialKeyDown(int key, int x, int y) {
+    if (!inMenu) return;
+    if (key == GLUT_KEY_UP) {
+        menuSelected = (menuSelected - 1 + menuOptionCount) % menuOptionCount;
+    } else if (key == GLUT_KEY_DOWN) {
+        menuSelected = (menuSelected + 1) % menuOptionCount;
+    } else if (key == GLUT_KEY_LEFT) {
+        if (historyPage > 0) historyPage--;
+    } else if (key == GLUT_KEY_RIGHT) {
+        int total = matchHistoryCount;
+        int pages = (total + recordsPerPage - 1) / recordsPerPage;
+        if (historyPage < pages - 1) historyPage++;
+    }
+    glutPostRedisplay();
 }
 
 // Chamada quando uma tecla é solta
@@ -229,35 +388,12 @@ void keyboardUp(unsigned char key, int x, int y) {
     if ((unsigned char)key < 256) keyStates[(unsigned char)key] = false;
 }
 
-// Processa o input do teclado a cada quadro
-void processKeyboard() {
-    float movementSpeed = 0.1f;
 
-    if (keyStates['w']) {
-        vec3 move;
-        glm_vec3_scale(cameraFront, movementSpeed, move);
-        glm_vec3_add(cameraPos, move, cameraPos);
-    }
-    if (keyStates['s']) {
-        vec3 move;
-        glm_vec3_scale(cameraFront, movementSpeed, move);
-        glm_vec3_sub(cameraPos, move, cameraPos);
-    }
-    if (keyStates['a']) {
-        vec3 move, cameraRight;
-        glm_vec3_cross(cameraFront, cameraUp, cameraRight);
-        glm_vec3_normalize(cameraRight);
-        glm_vec3_scale(cameraRight, movementSpeed, move);
-        glm_vec3_sub(cameraPos, move, cameraPos);
-    }
-    if (keyStates['d']) {
-        vec3 move, cameraRight;
-        glm_vec3_cross(cameraFront, cameraUp, cameraRight);
-        glm_vec3_normalize(cameraRight);
-        glm_vec3_scale(cameraRight, movementSpeed, move);
-        glm_vec3_add(cameraPos, move, cameraPos);
-    }
+void processKeyboard(void) {
+   
 }
+
+
 
 // Função para desenhar o martelo com primitivas OpenGL
 void drawHammer() {
@@ -299,9 +435,7 @@ void drawHammer() {
     gluDeleteQuadric(quadric);
 }
 
-// ===================================================================================
-// IMPLEMENTAÇÃO WHACK-A-MOLE
-// ===================================================================================
+// ---- Implementação Whack-a-Mole ----
 
 void gameTick(int value) {
     if (!gameActive) return;
@@ -314,7 +448,7 @@ void gameTick(int value) {
             glutTimerFunc(moleIntervalMs, gameTick, 0);
             return;
         }
-        // Escolhe slot aleatório (DIFERENTE do anterior sempre)
+        // Escolhe slot aleatório 
         int next = rand() % (int)numSlots;
         int attempts = 0;
         while (numSlots > 1 && next == currentActive && attempts < 10) {
@@ -336,13 +470,24 @@ void gameTick(int value) {
 
 void startGame() {
     if (gameActive) return;
+    int resuming = (isPaused && pausedRemainingMs > 0);
     gameActive = 1;
-    score = 0;
+    if (!resuming) {
+        score = 0;
+    }
     currentActive = -1;
     moleVisible = 0;
-    // iniciar loop de moles e agendar término da partida em gameDurationMs
+    // Define tempo de término do jogo usando glutGet(GLUT_ELAPSED_TIME)
+    if (resuming) {
+        gameEndTimeMs = glutGet(GLUT_ELAPSED_TIME) + pausedRemainingMs;
+        isPaused = 0; pausedRemainingMs = 0;
+    } else {
+        gameEndTimeMs = glutGet(GLUT_ELAPSED_TIME) + gameDurationMs;
+    }
+    printf("⏱ Tempo de jogo definido: %u segundos\n", (gameEndTimeMs - glutGet(GLUT_ELAPSED_TIME)) / 1000);
     glutTimerFunc(moleIntervalMs, gameTick, 0);
-    glutTimerFunc(gameDurationMs, stopGame, 0);
+    // Fecha menu ao iniciar
+    inMenu = 0;
 }
 
 void stopGame() {
@@ -350,7 +495,22 @@ void stopGame() {
     gameActive = 0;
     currentActive = -1;
     moleVisible = 0;
+    // Limpa o tempo de fim
+    gameEndTimeMs = 0;
+    // Ao parar o jogo, volta ao menu e limpa estado de pausa
+    isPaused = 0;
+    pausedRemainingMs = 0;
+    inMenu = 1;
     glutPostRedisplay();
+}
+
+void openMenu() {
+    inMenu = 1;
+    menuSelected = 0;
+}
+
+void closeMenu() {
+    inMenu = 0;
 }
 
 void addSlot(float centerX, float topY, float centerZ) {
@@ -411,16 +571,16 @@ void drawBoneco(float x, float z) {
     float trunkWidth = 0.9f;
     float trunkHeight = 1.4f;
     float trunkDepth = 0.6f;
-    float headRadius = 1.40f; // DOBRADO NOVAMENTE: era 0.70f (original 0.35f)
+    float headRadius = 1.40f; 
     
-    x += slotOffsetX - 2.0f;  // Move todo o boneco (avançou de -3 para -2)
+    x += slotOffsetX - 2.0f;  // Move todo o boneco 
     z += slotOffsetZ;
     
     glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT);
     glDisable(GL_LIGHTING);
     glDisable(GL_TEXTURE_2D);
 
-    // Busca o tipo do boneco usando coordenadas ORIGINAIS (antes dos offsets)
+    // Busca o tipo do boneco 
     int bonecoType = 0;
     float trunkR = 0.8f, trunkG = 0.6f, trunkB = 0.3f;
     for (unsigned int i = 0; i < numSlots; i++) {
@@ -435,7 +595,7 @@ void drawBoneco(float x, float z) {
         }
     }
     
-    // Desenha a cabeça PRIMEIRO (para manter billboard funcionando)
+  
     glPushMatrix();
     // Centraliza cabeça com o tronco
     float headX = x;
@@ -467,7 +627,7 @@ void drawBoneco(float x, float z) {
         
         // Rotações base para orientar textura (após billboard)
         glRotatef(-90.0f, 1.0f, 0.0f, 0.0f);  // Corrige orientação vertical
-        glRotatef(0.0f, 0.0f, 0.0f, 1.0f);     // Sem rotação Z (billboard já controla orientação)
+        glRotatef(0.0f, 0.0f, 0.0f, 1.0f);     
         
         GLUquadric* quad = gluNewQuadric();
         gluQuadricTexture(quad, GL_TRUE);
@@ -537,17 +697,17 @@ int loadSlotsFromFile(const char* path) {
     }
     fclose(f);
     
-    if (count != 8) {
-        printf("spots.txt precisa conter 8 linhas (encontradas=%u)\n", count);
+    if (count == 0) {
+        printf("spots.txt vazio ou inválido (encontradas=%u)\n", count);
         return 0;
     }
-    
+
     if (slots) { free(slots); slots = NULL; numSlots = 0; }
-    for (unsigned int i = 0; i < 8; i++) {
+    for (unsigned int i = 0; i < count; i++) {
         addSlotWithType(tmp[i][0], tmp[i][1], tmp[i][2], types[i]);
         printf("  Slot %d: (%.2f, %.2f, %.2f) Tipo=%d\n", i, tmp[i][0], tmp[i][1], tmp[i][2], types[i]);
     }
-    printf("✓ 8 slots carregados de %s\n", path);
+    printf("%u slots carregados de %s\n", count, path);
     return 1;
 }
 
@@ -564,11 +724,13 @@ Mesh processMesh(struct aiMesh* mesh, const struct aiScene* scene, Model* model)
 void processNode(struct aiNode* node, const struct aiScene* scene, Model* model);
 unsigned int TextureFromFile(const char* path, const char* directory);
 void loadMaterialTextures(struct aiMaterial* mat, enum aiTextureType type, const char* typeName, Mesh* outMesh, Model* model);
+// Protótipos do menu
+void openMenu(void);
+void closeMenu(void);
+void specialKeyDown(int key, int x, int y);
 
 
-// ===================================================================================
-// FUNÇÃO PRINCIPAL
-// ===================================================================================
+// ---- Função principal ----
 int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <caminho_para_o_modelo.obj>\n", argv[0]);
@@ -589,9 +751,9 @@ int main(int argc, char** argv) {
         return -1;
     }
     
-    printf("OpenGL Versão: %s\n", glGetString(GL_VERSION));
+    printf("OpenGL versão: %s\n", glGetString(GL_VERSION));
 
-    // --- Configurações do OpenGL Legado ---
+    // OpenGL legacy config
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_LIGHTING);
     glEnable(GL_LIGHT0);
@@ -600,61 +762,50 @@ int main(int argc, char** argv) {
     
     stbi_set_flip_vertically_on_load(1);
     
-    // Carrega modelo da sala
+    // carrega modelo da sala
     ourModel = Model_Create(argv[1]);
     if (!ourModel) {
         fprintf(stderr, "Falha ao carregar o modelo da sala.\n");
         return -1;
     }
     
-    // Carrega modelo do tronco (MEN.obj)
-    printf("\n--- Carregando modelo do tronco dos bonecos ---\n");
+    // carrega MEN.obj
     menModel = Model_Create("MEN.obj");
     if (!menModel) {
-        fprintf(stderr, "⚠️  Aviso: Falha ao carregar MEN.obj - usando cubos para troncos\n");
+    fprintf(stderr, "Aviso: Falha ao carregar MEN.obj - usando cubos para troncos\n");
     } else {
-        printf("✓ Modelo MEN.obj carregado com sucesso!\n");
+    printf("Modelo MEN.obj carregado com sucesso\n");
     }
 
-    // Martelo agora é desenhado com primitivas OpenGL - não precisa carregar modelo!
-    printf("Martelo será desenhado com primitivas OpenGL (não requer arquivo .obj)\n");
+    // martelo: primitiva GL
     
-    // Inicializa gerador de números aleatórios ANTES de carregar slots
+    // srand
     srand((unsigned int)time(NULL));
     
-    // Carrega slots (topeiras/bonecos) do arquivo
+    // Carrega slots (bonecos) do arquivo
     FILE* fspots = fopen("spots.txt", "r");
     if (fspots) {
         fclose(fspots);
         if (loadSlotsFromFile("spots.txt")) {
-            printf("✓ Slots carregados! Iniciando jogo automaticamente...\n");
-            printf("════════════════════════════════════════════════════════\n");
-            printf("  🎮 MODO WHACK-A-MOLE ATIVO!\n");
-            printf("  📍 Bonecos aparecem ALEATORIAMENTE em posições diferentes\n");
-            printf("  🎨 Tipos ALEATÓRIOS a cada aparição:\n");
-            printf("     🟢 Verde  = +1 ponto\n");
-            printf("     🔵 Azul   = +2 pontos\n");
-            printf("     🔴 Vermelho = -1 ponto (EVITE!)\n");
-            printf("     ⚫ Preto  = +4 pontos (RARO!)\n");
-            printf("  ⌨️  Tecla B = iniciar jogo | V = modo visual\n");
-            printf("════════════════════════════════════════════════════════\n");
-            // NÃO inicia o jogo automaticamente - pressione B para começar
-            // startGame();
+            printf("Slots carregados. Pressione B para iniciar.\n");
         }
     } else {
-        printf("⚠ spots.txt não encontrado - jogo sem bonecos\n");
+    printf("spots.txt não encontrado - jogo sem bonecos\n");
     }
     
-    // Inicializa texturas das cabeças dos bonecos
     initHeadTextures();
+    // carrega histórico
+    loadMatchHistoryFromFile();
+    printf("Histórico carregado: %d registros\n", matchHistoryCount);
     
-    // --- Registro de Callbacks e Loop Principal ---
+    // registra callbacks
     glutDisplayFunc(renderScene);
     glutReshapeFunc(reshape);
     glutMouseFunc(mouseButton);
     glutPassiveMotionFunc(mouseMove);  // Movimento SEM clicar
-    glutMotionFunc(mouseMove);          // Movimento COM clicar (mantido para compatibilidade)
+    glutMotionFunc(mouseMove);          // Movimento COM clicar 
     glutKeyboardFunc(keyboardDown);
+    glutSpecialFunc(specialKeyDown);
     glutKeyboardUpFunc(keyboardUp);
     atexit(cleanup);
 
@@ -663,13 +814,11 @@ int main(int argc, char** argv) {
     return 0;
 }
 
-// ===================================================================================
-// FUNÇÕES DE CALLBACK DO GLUT
-// ===================================================================================
+// ---- Callbacks (GLUT) ----
 void renderScene(void) {
     processKeyboard();
 
-    // 1. Atualiza a animação do martelo (lógica movida para o topo)
+    // Atualiza animação do martelo
     float moveSpeed = 0.02f; // Velocidade de movimento
     float swingSpeed = 1.2f; // Velocidade de batida
     
@@ -682,7 +831,7 @@ void renderScene(void) {
             if (hammerAnimationMovingtoTarget >= 1.0f) {
                 hammerAnimationMovingtoTarget = 1.0f;
                 hammerState = SWINGING_DOWN;
-                printf("⚡ Martelo chegou no alvo, iniciando swing!\n");
+                printf("Martelo chegou no alvo, iniciando swing!\n");
             }
             
             // Interpolação da posição 3D (lerp vetorial)
@@ -691,7 +840,6 @@ void renderScene(void) {
             // Aumenta a escala com distância para compensar perspectiva
             // Mantém tamanho visual mais constante independente da distância
             float distanceToCamera = glm_vec3_distance(cameraPos, hammerPosCurrent);
-            // Cresce até 2.5x em distâncias grandes (50 unidades+)
             float distanceFactor = 1.0f + ((distanceToCamera - 10.0f) / 20.0f);
             distanceFactor = glm_clamp(distanceFactor, 1.0f, 4.5f);
             hammerCurrentScale = hammerBaseScale * distanceFactor;
@@ -703,7 +851,7 @@ void renderScene(void) {
             hammerAnimationAngle = 90.0f;
             hammerState = SWINGING_UP;
             
-            // DETECÇÃO DE COLISÃO NO MOMENTO DO IMPACTO!
+            // Detecção de colisão no impacto
             float hitRadius = 20.0f; // Range equilibrado
             int hit = 0;
             float minDist = 999999.0f;
@@ -727,26 +875,29 @@ void renderScene(void) {
                 
                 if (dist <= hitRadius && !slots[i].clicked) {
                     slots[i].clicked = 1;
-                    int points = (slots[i].type == 0) ? 1 : 
-                                (slots[i].type == 1) ? 2 :
+                    int points = (slots[i].type == 0) ? 2 : 
+                                (slots[i].type == 1) ? 1 :
                                 (slots[i].type == 2) ? -1 : 4;
                     score += points;
-                    printf("💥 ACERTOU! Slot %d Tipo %d = %+d pts | Score: %d | Dist: %.2f\n", 
-                           i, slots[i].type, points, score, dist);
+              printf("ACERTOU! Slot %d Tipo %d = %+d pts | Score: %d | Dist: %.2f\n", 
+                  i, slots[i].type, points, score, dist);
                     
                     if (gameActive) {
                         moleVisible = 0; // Esconde imediatamente
                     }
+                    // Som de acerto (Windows)
+#ifdef _WIN32
+                    Beep(500, 200);
+#endif
                     hit = 1;
                     break;
                 }
             }
             
             // Se errou, mostra a distância até o mais próximo
-            if (!hit && closestSlot >= 0) {
-                printf("❌ ERROU! Mais próximo: Slot %d a %.2f unidades (precisa < %.1f)\n", 
-                       closestSlot, minDist, hitRadius);
-            }
+                if (!hit && closestSlot >= 0) {
+                    printf("ERROU! Mais próximo: Slot %d a %.2f (precisa < %.1f)\n", closestSlot, minDist, hitRadius);
+                }
         }
         
     } else if (hammerState == SWINGING_UP) {
@@ -902,7 +1053,6 @@ void renderScene(void) {
     }
 
     // --- Desenha o Martelo com Primitivas OpenGL no Espaço 3D ---
-    // IMPORTANTE: Desabilita depth test para o martelo sempre ficar visível (não ser coberto)
     glDisable(GL_DEPTH_TEST);
     
     glPushMatrix(); // Salva a matriz atual
@@ -940,17 +1090,12 @@ void renderScene(void) {
     // Escala o martelo baseada na distância (perspectiva automática)
     glScalef(hammerCurrentScale, hammerCurrentScale, hammerCurrentScale);
 
-    // ESTRATÉGIA: Fazer o cabo ser o pivô fixo e a cabeça girar para atingir o alvo
-    // Ordem de transformações (lembre: OpenGL aplica de BAIXO para CIMA):
     
     glTranslatef(0.0f, -2.5f, 0.0f); // Move o martelo para BAIXO (cabo em 0,0,0)
     // 1. Rotaciona PRIMEIRO em torno da origem (marretada)
     //    A origem será onde o cabo fica (pivô fixo)
     glRotatef(hammerAnimationAngle, 0.0f, 0.0f, 1.0f);
     
-    // 2. Move o martelo para BAIXO para que a CABEÇA fique no alvo
-    //    drawHammer() desenha cabo em (0,0,0) e cabeça em (0,2.5,0)
-    //    Movemos -2.5 em Y: cabo em (0,-2.5,0) e cabeça em (0,0,0) = ALVO!
 
     // Desenha o martelo com primitivas OpenGL
     drawHammer();
@@ -977,6 +1122,226 @@ void renderScene(void) {
     for (char* c = scoreStr; *c; c++) {
         glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
     }
+    // Timer HUD
+    if (gameActive && gameEndTimeMs > 0) {
+        unsigned int now = glutGet(GLUT_ELAPSED_TIME);
+        int remainingMs = (int)gameEndTimeMs - (int)now;
+        if (remainingMs <= 0) {
+            addMatchRecord(score);
+            printf("Tempo esgotado: score=%d\n", score);
+            // Mostra modal com score final antes de voltar ao menu
+            showFinalModal = 1;
+            gameActive = 0; // pausa a lógica
+            remainingMs = 0;
+        }
+
+        int totalSeconds = remainingMs / 1000;
+        int minutes = totalSeconds / 60;
+        int seconds = totalSeconds % 60;
+        char timeStr[64];
+        sprintf(timeStr, "Tempo: %02d:%02d", minutes, seconds);
+
+        glColor3f(1.0f, 1.0f, 0.2f);
+        glRasterPos2i(10, screen_height - 40);
+        for (char* c = timeStr; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+
+        if (isPaused) {
+            char pausedStr[] = " (PAUSADO)";
+            for (char* c = pausedStr; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+        }
+    }
+
+    // pausa HUD
+    {
+        char pauseHint[] = "P - Pausa/Resume";
+        glColor3f(0.8f, 0.8f, 0.8f);
+        glRasterPos2i(10, screen_height - 60);
+        for (char* c = pauseHint; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
+    }
+
+    // menu overlay
+    if (inMenu) {
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix();
+        glLoadIdentity();
+        gluOrtho2D(0, screen_width, 0, screen_height);
+        glMatrixMode(GL_MODELVIEW);
+        glPushMatrix();
+        glLoadIdentity();
+
+    int boxW = 640, boxH = 420;
+    int boxX = (screen_width - boxW) / 2;
+    int boxY = (screen_height - boxH) / 2;
+    int topOffset = 80;
+    int optSpacing = 50;
+
+        // Fundo semi-transparente
+        glPushAttrib(GL_ALL_ATTRIB_BITS);
+        glDisable(GL_TEXTURE_2D);
+        glDisable(GL_LIGHTING);
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(0.05f, 0.05f, 0.05f, 0.9f);
+        glBegin(GL_QUADS);
+            glVertex2i(boxX, boxY);
+            glVertex2i(boxX + boxW, boxY);
+            glVertex2i(boxX + boxW, boxY + boxH);
+            glVertex2i(boxX, boxY + boxH);
+        glEnd();
+
+    // Opções do menu
+    const char* options[] = { "Iniciar Jogo", "Duração: ", "Modo Visual: ", "Ordenar por: ", "Pontuacoes", "Sair" };
+        char line[128];
+        // Desenha opção destacada com retângulo e depois o texto
+        for (int i = 0; i < menuOptionCount; i++) {
+            int y = boxY + boxH - topOffset - i * optSpacing;
+            if (i == 1) sprintf(line, "%s%d s", options[i], menuDurations[menuDurationIndex]);
+            else if (i == 2) sprintf(line, "%s%s", options[i], drawCubeMode ? "Bonecos 3D" : "Quadrados verdes");
+            else if (i == 3) sprintf(line, "%s%s", options[i], sortByScore ? "Melhores" : "Mais recentes");
+            else sprintf(line, "%s", options[i]);
+
+            // highlight background for selected
+            if (i == menuSelected) {
+                glColor4f(0.22f, 0.18f, 0.06f, 0.95f);
+                int txtW = boxW - 80;
+                glBegin(GL_QUADS);
+                    glVertex2i(boxX + 20, y - 12);
+                    glVertex2i(boxX + 20 + txtW, y - 12);
+                    glVertex2i(boxX + 20 + txtW, y + 30);
+                    glVertex2i(boxX + 20, y + 30);
+                glEnd();
+                glColor3f(1.0f, 0.95f, 0.3f);
+            } else {
+                glColor3f(1.0f, 1.0f, 1.0f);
+            }
+
+            glRasterPos2i(boxX + 40, y + 8);
+            for (char* c = line; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+        }
+
+        // Se o usuário pediu para ver as Pontuações, desenha-as como um modal separado
+        if (showScoresMenu) {
+            // Calcula ordenação/paginação
+            int total = matchHistoryCount;
+            int indices[MATCH_HISTORY_MAX];
+            for (int i = 0; i < total; i++) indices[i] = i;
+            if (sortByScore && total > 1) {
+                for (int a = 0; a < total-1; a++) for (int b = 0; b < total-1-a; b++) {
+                    if (matchHistory[indices[b]].score < matchHistory[indices[b+1]].score) {
+                        int t = indices[b]; indices[b] = indices[b+1]; indices[b+1] = t;
+                    }
+                }
+            } else {
+                for (int i = 0; i < total/2; i++) {
+                    int t = indices[i]; indices[i] = indices[total-1-i]; indices[total-1-i] = t;
+                }
+            }
+
+            int pages = (total + recordsPerPage - 1) / recordsPerPage;
+            if (pages == 0) pages = 1;
+            if (historyPage >= pages) historyPage = pages - 1;
+            int start = historyPage * recordsPerPage;
+            int show = ((total - start) < recordsPerPage) ? (total - start) : recordsPerPage;
+
+            // Desenha modal central (semelhante ao modal final)
+            glPopAttrib(); // garante estado limpo antes do modal
+            glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW);
+
+            glMatrixMode(GL_PROJECTION);
+            glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, screen_width, 0, screen_height);
+            glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+
+            int mw = 520, mh = 360;
+            int mx = (screen_width - mw)/2, my = (screen_height - mh)/2;
+
+            glPushAttrib(GL_ALL_ATTRIB_BITS);
+            glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            // Fundo do modal
+            glColor4f(0.04f, 0.04f, 0.04f, 0.95f);
+            glBegin(GL_QUADS);
+                glVertex2i(mx, my);
+                glVertex2i(mx+mw, my);
+                glVertex2i(mx+mw, my+mh);
+                glVertex2i(mx, my+mh);
+            glEnd();
+
+            // Título
+            char title[128]; snprintf(title, sizeof(title), "Pontuações");
+            glColor3f(1.0f, 0.95f, 0.3f);
+            glRasterPos2i(mx+24, my+mh-40); for (char* c = title; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+
+            // Lista de pontuações
+            glColor3f(0.95f, 0.95f, 0.95f);
+            int listStartY = my + mh - 80;
+            for (int i = 0; i < show; i++) {
+                int idx = indices[start + i];
+                char buf[128];
+                snprintf(buf, sizeof(buf), "%s - Score: %d", matchHistory[idx].timeStr, matchHistory[idx].score);
+                glRasterPos2i(mx+32, listStartY - i * 28);
+                for (char* c = buf; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
+            }
+
+            // Paginação e instrução de fechamento
+            char pageStr[64]; snprintf(pageStr, sizeof(pageStr), "Página %d/%d", historyPage+1, pages);
+            glRasterPos2i(mx + mw - 140, my + 28);
+            for (char* c = pageStr; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
+
+            char hint[] = "Enter/Esc/M para fechar | <-/-> para navegar | T/t para pág.";
+            glRasterPos2i(mx+24, my+28); for (char* c = hint; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
+
+            glPopAttrib();
+            glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW);
+
+            // Re-abre matrizes para continuar o resto do render
+            glMatrixMode(GL_PROJECTION);
+            glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, screen_width, 0, screen_height);
+            glMatrixMode(GL_MODELVIEW);
+            glPushMatrix(); glLoadIdentity();
+            // Re-aplica o atributo do menu drawing area para não quebrar o resto
+            glPushAttrib(GL_ALL_ATTRIB_BITS);
+        }
+
+        glPopAttrib();
+
+        glPopMatrix();
+        glMatrixMode(GL_PROJECTION);
+        glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
+    }
+
+    // Exibe modal final se necessário
+    if (showFinalModal) {
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix(); glLoadIdentity(); gluOrtho2D(0, screen_width, 0, screen_height);
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+
+        int w = 420, h = 220;
+        int x = (screen_width - w)/2, y = (screen_height - h)/2;
+        glPushAttrib(GL_ALL_ATTRIB_BITS);
+        glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(0.05f, 0.05f, 0.05f, 0.95f);
+        glBegin(GL_QUADS);
+            glVertex2i(x, y);
+            glVertex2i(x+w, y);
+            glVertex2i(x+w, y+h);
+            glVertex2i(x, y+h);
+        glEnd();
+
+        char title[128]; snprintf(title, sizeof(title), "Partida finalizada!");
+        char body[128]; snprintf(body, sizeof(body), "Score final: %d", score);
+        glColor3f(1,1,1);
+        glRasterPos2i(x+24, y+h-48); for (char* c = title; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+        glRasterPos2i(x+24, y+h-88); for (char* c = body; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *c);
+
+        char hint[] = "Pressione Enter para voltar ao menu";
+        glRasterPos2i(x+24, y+24); for (char* c = hint; *c; c++) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *c);
+
+        glPopAttrib();
+        glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW);
+    }
     
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
@@ -1000,6 +1365,58 @@ void mouseButton(int button, int state, int x, int y) {
         mouse_left_button_down = (state == GLUT_DOWN);
         
         // Inicia a animação ao pressionar o botão
+        // Se estamos no menu, trata clique nas opções
+        if (inMenu && state == GLUT_DOWN) {
+            int boxW = 640, boxH = 420;
+            int boxX = (screen_width - boxW) / 2;
+            int boxY = (screen_height - boxH) / 2;
+            int topOffset = 80;
+            int optSpacing = 50;
+            // transforma y da janela para coordenadas OpenGL (0 bottom)
+            int winY = screen_height - y;
+            if (x >= boxX && x <= boxX + boxW && winY >= boxY && winY <= boxY + boxH) {
+                // calcula qual opção foi clicada usando a mesma fórmula de desenho
+                for (int i = 0; i < menuOptionCount; i++) {
+                    int optY = boxY + boxH - topOffset - i * optSpacing;
+                    int optTop = optY + 30; // reasonable top
+                    int optBottom = optY - 12; // reasonable bottom
+                    if (winY <= optTop && winY >= optBottom) {
+                        menuSelected = i;
+                        break;
+                    }
+                }
+                // Simula Enter (inclui nova opção Ordenar por)
+                if (menuSelected == 0) {
+                    gameDurationMs = menuDurations[menuDurationIndex] * 1000;
+                    startGame();
+                } else if (menuSelected == 1) {
+                    menuDurationIndex = (menuDurationIndex + 1) % (sizeof(menuDurations)/sizeof(menuDurations[0]));
+                } else if (menuSelected == 2) {
+                    drawCubeMode = !drawCubeMode;
+                } else if (menuSelected == 3) {
+                    sortByScore = !sortByScore; historyPage = 0;
+                } else if (menuSelected == 4) {
+                    showScoresMenu = 1; historyPage = 0;
+                } else if (menuSelected == 5) {
+                    exit(0);
+                }
+                // Clique em áreas das setas de paginação
+                int total = matchHistoryCount;
+                int pages = (total + recordsPerPage - 1) / recordsPerPage;
+                int arrowLeftX1 = boxX + boxW - 240, arrowLeftX2 = boxX + boxW - 220;
+                int arrowRightX1 = boxX + boxW - 120, arrowRightX2 = boxX + boxW - 100;
+                int arrowY1 = boxY + 16, arrowY2 = boxY + 36;
+                if (x >= arrowLeftX1 && x <= arrowLeftX2 && winY >= arrowY1 && winY <= arrowY2 && historyPage > 0) {
+                    historyPage--; glutPostRedisplay(); return;
+                }
+                if (x >= arrowRightX1 && x <= arrowRightX2 && winY >= arrowY1 && winY <= arrowY2 && historyPage < pages - 1) {
+                    historyPage++; glutPostRedisplay(); return;
+                }
+                glutPostRedisplay();
+                return;
+            }
+        }
+
         if (state == GLUT_DOWN && hammerState == IDLE) {
             // --- RAY CASTING PARA ENCONTRAR PONTO 3D NO MUNDO ---
             
@@ -1116,9 +1533,7 @@ void cleanup(void) {
     // Martelo agora é primitiva OpenGL - não precisa destruir modelo
 }
 
-// ===================================================================================
-// NOVO BLOCO DE FUNÇÕES DE CARREGAMENTO (VERSÃO SEGURA E EFICIENTE)
-// ===================================================================================
+// ---- Funções de carregamento (refatoradas) ----
 
 // Protótipos para as novas funções (coloque com os outros protótipos se preferir)
 void processNode_pass1_count(struct aiNode* node, const struct aiScene* scene, unsigned int* meshCounter, unsigned int* textureCounter);
@@ -1140,7 +1555,7 @@ void processNode_pass1_count(struct aiNode* node, const struct aiScene* scene, u
     }
 }
 
-// Passa 2: Preenche os dados nas estruturas já alocadas
+//  Preenche os dados nas estruturas já alocadas
 void processNode_pass2_fillData(struct aiNode* node, const struct aiScene* scene, Model* model, unsigned int* mesh_idx_counter) {
     for (unsigned int i = 0; i < node->mNumMeshes; i++) {
         struct aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
@@ -1152,7 +1567,7 @@ void processNode_pass2_fillData(struct aiNode* node, const struct aiScene* scene
     }
 }
 
-// Nova versão de loadMaterialTextures que apenas preenche os dados
+
 void loadMaterialTextures_fillData(struct aiMaterial* mat, enum aiTextureType type, const char* typeName, Mesh* outMesh, Model* model) {
     unsigned int texture_count_in_mat = aiGetMaterialTextureCount(mat, type);
     if (texture_count_in_mat == 0) return;
@@ -1181,7 +1596,6 @@ void loadMaterialTextures_fillData(struct aiMaterial* mat, enum aiTextureType ty
             strcpy(texture.path, str.data);
             
             outMesh->textures[outMesh->numTextures++] = texture;
-            // A lista global é preenchida apenas uma vez, então não precisa de realloc
             model->textures_loaded[model->num_textures_loaded++] = texture;
         }
     }
@@ -1402,8 +1816,7 @@ void loadMaterialTextures(struct aiMaterial* mat, enum aiTextureType type, const
             // Adiciona à lista de texturas da malha
             outMesh->textures[outMesh->numTextures++] = texture;
 
-            // Adiciona à lista global de texturas do modelo (usando realloc aqui é aceitável,
-            // pois o número de texturas únicas geralmente é pequeno)
+            // Adiciona à lista global de texturas do modelo 
             model->num_textures_loaded++;
             model->textures_loaded = (Texture*)realloc(model->textures_loaded, model->num_textures_loaded * sizeof(Texture));
             model->textures_loaded[model->num_textures_loaded - 1] = texture;
